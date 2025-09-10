@@ -6,6 +6,17 @@ requires: LLVM-13, clang-13, lit, gperftools, cmake, sqlite, ninja, z3
 # get the repo
 git clone --recursive git@github.com:uchi-zero/klee.git
 
+cd klee
+
+# checkout the branch
+git -c submodule.recurse=true checkout feat/dump-unsolvable-path
+
+# sync submodule URLs
+git submodule sync --recursive
+
+# fetch & check out the exact submodule SHAs recorded by the branch
+git submodule update --init --recursive --jobs 8
+
 # build the klee-uclibc
 cd 3rd/klee-uclibc
 ./configure --make-llvm-lib # --with-cc clang-13 --with-llvm-config llvm-config-13
