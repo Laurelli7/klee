@@ -14,6 +14,9 @@
 #ifndef EMPC_SEARCHERGRAPHALGORITHM_HPP_
 #define EMPC_SEARCHERGRAPHALGORITHM_HPP_
 
+#include <cstddef>    
+#include <cstdint>
+
 #include <cassert>
 #include <cstdlib>
 #include <limits>
@@ -216,8 +219,8 @@ public:
   typedef std::size_t CID;
   typedef std::size_t PID;
 
-  const VID VID_MAX = SIZE_MAX;
-  const PID PID_MAX = SIZE_MAX;
+  const VID VID_MAX = std::numeric_limits<VID>::max();
+  const PID PID_MAX = std::numeric_limits<PID>::max();
 
 private:
   struct MinimalPathCover {
@@ -496,14 +499,14 @@ template <typename _Tp>
 void BipartiteGraph<_Tp>::getMaximumMatching(
     std::vector<std::pair<std::size_t, std::size_t>> &matching) {
   static const std::size_t NONE_NODE = std::numeric_limits<std::size_t>::max();
-  static const uint64_t INFIN_DIST = std::numeric_limits<uint64_t>::max();
+  using Dist = std::uint64_t;
+  static constexpr Dist INFIN_DIST = std::numeric_limits<Dist>::max();
 
   auto isNoneNode = [](std::size_t node) -> bool { return node == NONE_NODE; };
 
-  auto isInfDist = [](uint64_t dist) -> bool { return dist == INFIN_DIST; };
+  auto isInfDist = [](Dist dist) -> bool { return dist == INFIN_DIST; };
 
-  auto equalDistance = [&](uint64_t dist1, uint64_t dist2,
-                           uint64_t delta = 0) -> bool {
+  auto equalDistance = [&](Dist dist1, Dist dist2, Dist delta = 0) -> bool {
     if (isInfDist(dist1) && isInfDist(dist2))
       return true;
     else if (isInfDist(dist2) || isInfDist(dist1))
@@ -514,7 +517,7 @@ void BipartiteGraph<_Tp>::getMaximumMatching(
 
   std::vector<std::size_t> leftMatches(leftSize, NONE_NODE),
       rightMatches(rightSize, NONE_NODE);
-  std::unordered_map<std::size_t, uint64_t> leftDistances;
+  std::unordered_map<std::size_t, Dist> leftDistances;
   std::list<std::size_t> leftQueue;
 
   auto breadthFirstSearch = [&]() -> bool {
@@ -1097,7 +1100,7 @@ void DirectedAcyclicGraph<_Tp>::addEdge(const _Tp &parent, const _Tp &child) {
   vertexMap[childVID] = child;
 
   graph[parentVID].emplace(childVID);
-  graph[childVID];
+  (void) graph[childVID];
 }
 
 template <class _Tp> bool DirectedAcyclicGraph<_Tp>::checkAcyclic() {
