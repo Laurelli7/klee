@@ -186,13 +186,22 @@ public:
   void updateState(ExtendedExecutionState *extState, StateStepType stepType);
 };
 
+/// @brief Stable, strict-weak-ordering comparator for ExtendedExecutionState.
+/// Uses the immutable ID from the underlying ExecutionState to ensure
+/// SWO correctness and avoid dereferencing freed states.
 struct ExtStateIDCompare {
   bool operator()(const ExtendedExecutionState *a,
-                  const ExtendedExecutionState *b) const {
-    if (!a->rawState || !b->rawState)
+                  const ExtendedExecutionState *b) const noexcept {
+    // Equality must return false for strict-weak-ordering
+    if (a == b)
       return false;
-    else
-      return a->rawState->id < b->rawState->id;
+    
+    // Both must have valid rawState pointers
+    if (!a || !a->rawState || !b || !b->rawState)
+      return std::less<const ExtendedExecutionState*>()(a, b);
+    
+    // Use immutable ExecutionState::id for stable ordering
+    return a->rawState->id < b->rawState->id;
   }
 };
 
@@ -233,6 +242,9 @@ private:
     void erase(ExecutionState *state);
     void erase(const llvm::BasicBlock *coveredBlock);
     ExtendedExecutionState *select(unsigned rnd);
+    
+    /// @brief Safely remove a state from all PDFs, avoiding comparator use on freed pointers
+    void eraseStateFromAllPDFs(ExtendedExecutionState *extState);
   };
 
 private:
@@ -267,6 +279,9 @@ private:
   bool isCoveredBranch(
       const llvm::BasicBlock *bblock,
       const std::unordered_set<const llvm::BasicBlock *> &successors);
+      
+  /// @brief Remove a state from all internal structures before it's freed
+  void eraseStateFromAllStructures(ExtendedExecutionState *extState);
 
 public:
   SearcherHelper() = delete;

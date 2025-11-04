@@ -17,6 +17,9 @@
 #include <iterator>
 
 #include "klee/Module/KInstruction.h"
+#include "klee/Support/Debug.h"
+
+#define DEBUG_TYPE "empc"
 
 namespace klee {
 namespace Empc {
@@ -433,6 +436,19 @@ void SearcherHelper::ExtStatePropRecord::erase(
     ExtendedExecutionState *extState) {
   if (!extState)
     return;
+  eraseStateFromAllPDFs(extState);
+}
+
+void SearcherHelper::ExtStatePropRecord::eraseStateFromAllPDFs(
+    ExtendedExecutionState *extState) {
+  if (!extState)
+    return;
+  
+  KLEE_DEBUG_WITH_TYPE("empc", llvm::errs()
+    << "[EMPc] eraseStateFromAllPDFs: state_id="
+    << (extState->rawState ? extState->rawState->id : 0) << "\n");
+    
+  // Safely remove from all PDFs using inTree to avoid bad comparator lookups
   if (coveredNewFeasibleStates->inTree(extState))
     coveredNewFeasibleStates->remove(extState);
   if (feasiblePathStates->inTree(extState))
@@ -453,8 +469,26 @@ void SearcherHelper::ExtStatePropRecord::erase(
     const llvm::BasicBlock *coveredBlock) {
   if (!coveredBlock)
     return;
-  for (ExtendedExecutionState *extState :
-       uncoveredStateBlockMap.at(coveredBlock)) {
+  
+  KLEE_DEBUG_WITH_TYPE("empc", llvm::errs()
+    << "[EMPc] ExtStatePropRecord::erase(BB): block="
+    << coveredBlock->getName() << "\n");
+    
+  // Safely iterate over states associated with this block.
+  // Copy the set first to avoid iterator invalidation during removal.
+  auto statesAtBlock = uncoveredStateBlockMap.at(coveredBlock);
+  
+  KLEE_DEBUG_WITH_TYPE("empc", llvm::errs()
+    << "[EMPc] ExtStatePropRecord::erase(BB): num_states="
+    << statesAtBlock.size() << "\n");
+  
+  for (ExtendedExecutionState *extState : statesAtBlock) {
+    // Guard against null or invalid states
+    if (!extState || !extState->rawState)
+      continue;
+      
+    // Use inTree() to safely check presence before removal
+    // This avoids comparator issues with potentially stale pointers
     if (coveredNewFeasibleStates->inTree(extState)) {
       coveredNewFeasibleStates->remove(extState);
     }
@@ -462,7 +496,12 @@ void SearcherHelper::ExtStatePropRecord::erase(
       coveredNewInfeasibleStates->remove(extState);
     }
   }
+  
+  // Remove the block from the map
   uncoveredStateBlockMap.remove(coveredBlock);
+  
+  KLEE_DEBUG_WITH_TYPE("empc", llvm::errs()
+    << "[EMPc] ExtStatePropRecord::erase(BB): completed\n");
 }
 
 ExtendedExecutionState *
@@ -510,6 +549,40 @@ bool SearcherHelper::isCoveredBranch(
   return true;
 }
 
+void SearcherHelper::eraseStateFromAllStructures(ExtendedExecutionState *extState) {
+  if (!extState)
+    return;
+  
+  KLEE_DEBUG_WITH_TYPE("empc", llvm::errs()
+    << "[EMPc] eraseStateFromAllStructures: state_id="
+    << (extState->rawState ? extState->rawState->id : 0)
+    << " depth=" << (extState->rawState ? extState->rawState->depth : 0)
+    << "\n");
+    
+  // Remove from ExtStatePropRecord PDFs
+  extStatesRecord.eraseStateFromAllPDFs(extState);
+  
+  // Remove from orderedStateMap
+  uint32_t statePrior = extState->rawState->depth;
+  auto mapIter = orderedStateMap.find(statePrior);
+  if (mapIter != orderedStateMap.end()) {
+    mapIter->second.erase(extState);
+    if (mapIter->second.empty()) {
+      orderedStateMap.erase(mapIter);
+    }
+  }
+  
+  // Remove from branch dependence map
+  branchDepStateMap->removeState(extState);
+  
+  // Remove from uncovered state-block map
+  extStatesRecord.uncoveredStateBlockMap.remove(extState);
+  
+  KLEE_DEBUG_WITH_TYPE("empc", llvm::errs()
+    << "[EMPc] eraseStateFromAllStructures: completed for state_id="
+    << (extState->rawState ? extState->rawState->id : 0) << "\n");
+}
+
 void SearcherHelper::update(
     klee::ExecutionState *current,
     const std::vector<klee::ExecutionState *> &addedStates,
@@ -523,6 +596,57 @@ void SearcherHelper::update(
   std::string logStr;
   bool hasSteppedStates = false;
   bool isInDefinedFunctions = false;
+
+  // ========================================================================
+  // CRITICAL: Process removed states FIRST before any lookups or operations
+  // This prevents comparator crashes from dereferencing freed pointers
+  // ========================================================================
+  
+  KLEE_DEBUG_WITH_TYPE("empc", llvm::errs()
+    << "[EMPc] update: processing " << reallyRemovedStates.size()
+    << " removed states FIRST\n");
+  
+  // [DEBUG]
+  if (Logging::check(Logging::Type::STATE)) {
+    logStr +=
+        "Removed States (" + std::to_string(reallyRemovedStates.size()) + ")\n";
+  }
+  
+  for (auto removedState : reallyRemovedStates) {
+    // Get extended state before we do any operations
+    ExtendedExecutionState *removedExtState = nullptr;
+    if (ExtendedExecutionState::findExecutionState(removedState)) {
+      removedExtState = ExtendedExecutionState::addExecutionState(removedState);
+      
+      // Sanity check: comparator must satisfy strict weak ordering
+      assert(removedExtState && "Extended state must exist before removal");
+      assert(removedExtState->rawState && "Raw state must be valid");
+      
+      // Verify SWO: a < a must be false
+      ExtStateIDCompare cmp;
+      assert(!cmp(removedExtState, removedExtState) && 
+             "Comparator violates SWO: state < state must be false");
+      
+      // Remove from ALL internal structures immediately
+      eraseStateFromAllStructures(removedExtState);
+    }
+
+    // Remove from general set and parsedStates
+    generalStateSet.erase(removedState);
+    if (parsedStates->inTree(removedState))
+      parsedStates->remove(removedState);
+
+    // Finally, remove the extended state wrapper itself
+    ExtendedExecutionState::removeExecutionState(removedState);
+
+    // [DEBUG]
+    if (Logging::check(Logging::Type::STATE)) {
+      logStr += "(" + std::to_string(removedState->id) + ")\n";
+    }
+  }
+
+  KLEE_DEBUG_WITH_TYPE("empc", llvm::errs()
+    << "[EMPc] update: removed states purged, proceeding with adds/updates\n");
 
   // Add states
   if (Logging::check(Logging::Type::STATE)) {
@@ -723,33 +847,7 @@ void SearcherHelper::update(
     logStr += "\n";
   }
 
-  // Remove
-  // [DEBUG]
-  if (Logging::check(Logging::Type::STATE)) {
-    logStr +=
-        "Removed States (" + std::to_string(reallyRemovedStates.size()) + ")\n";
-  }
-  for (auto removedState : reallyRemovedStates) {
-    extStatesRecord.erase(removedState);
-
-    // Remove from dependence recording
-    if (ExtendedExecutionState::findExecutionState(removedState))
-      branchDepStateMap->removeState(
-          ExtendedExecutionState::addExecutionState(removedState));
-
-    ExtendedExecutionState::removeExecutionState(removedState);
-    generalStateSet.erase(removedState);
-
-    // Discrete
-    parsedStates->remove(removedState);
-
-    // [DEBUG]
-    if (Logging::check(Logging::Type::STATE)) {
-      logStr += "(" + std::to_string(removedState->id) + ")\n";
-    }
-  }
-
-  // [DEBUG]
+  // [DEBUG] - Log update summary
   if (Logging::check(Logging::Type::STATE)) {
     if (!addedStates.empty() || hasSteppedStates ||
         !reallyRemovedStates.empty()) {
