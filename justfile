@@ -5,7 +5,7 @@ uclibc:
     set -euxo pipefail
     mkdir -p 3rd
     if [ ! -d "3rd/klee-uclibc" ]; then
-        git clone git@github.com:klee/klee-uclibc.git 3rd/klee-uclibc
+        git clone https://github.com/klee/klee-uclibc.git 3rd/klee-uclibc
     fi
     pushd 3rd/klee-uclibc
         ./configure --make-llvm-lib
