@@ -38,6 +38,9 @@
               ninja
               cppcheck
               lit
+              texinfo
+              unzip
+              uv
             ]
             ++ (with pkgs.llvmPackages_13; [
               libllvm
