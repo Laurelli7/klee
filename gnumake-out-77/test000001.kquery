@@ -1,0 +1,9 @@
+array A_data_stat[144] : w32 -> w8 = symbolic
+(query [(Eq false
+             (Eq 0
+                 (And w64 (ReadLSB w64 8 A_data_stat)
+                          2147483647)))
+         (Eq 0
+             (And w64 (ReadLSB w64 56 A_data_stat)
+                      18446744073709486080))]
+        false)

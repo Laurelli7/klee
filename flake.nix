@@ -51,6 +51,8 @@
               distutils
               tabulate
               z3-solver
+              openai
+              anthropic
             ]);
           env = {
             # Z3_LIBRARY_PATH = "${pkgs.z3.dev}/lib";

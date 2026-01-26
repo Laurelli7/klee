@@ -79,6 +79,7 @@ public:
     NURS_QC,
     Empc, /* [Empc]: Empc Searcher */
     SGS,  /* [SGS]: Subpath guided */
+    LLMGuided, /* LLM-guided dynamic searcher that queries LLM per function */
   };
 };
 
@@ -341,11 +342,11 @@ public:
   SubpathGuidedSearcher(Executor &_executor, uint index, RNG &_rng);
   ~SubpathGuidedSearcher() override = default;
 
-  ExecutionState &selectState();
+  ExecutionState &selectState() override;
   void update(ExecutionState *current,
               const std::vector<ExecutionState *> &addedStates,
-              const std::vector<ExecutionState *> &removedStates);
-  bool empty() { return states.empty(); }
+              const std::vector<ExecutionState *> &removedStates) override;
+  bool empty() override { return states.empty(); }
   void printName(llvm::raw_ostream &os) override;
 };
 

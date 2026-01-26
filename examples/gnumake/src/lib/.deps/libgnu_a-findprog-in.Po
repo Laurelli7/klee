@@ -1,0 +1,259 @@
+libgnu_a-findprog-in.o: findprog-in.c ../src/config.h findprog.h \
+  stdbool.h \
+  /nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/errno.h \
+  /nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/features.h \
+  /nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/features-time64.h \
+  /nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/wordsize.h \
+  /nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/timesize.h \
+  /nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/stdc-predef.h \
+  /nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/sys/cdefs.h \
+  /nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/long-double.h \
+  /nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/gnu/stubs.h \
+  /nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/gnu/stubs-64.h \
+  /nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/errno.h \
+  /nix/store/ip0lr151j9klbw3mq2n15wc6bsg0jjr8-linux-headers-6.12.7/include/linux/errno.h \
+  /nix/store/ip0lr151j9klbw3mq2n15wc6bsg0jjr8-linux-headers-6.12.7/include/asm/errno.h \
+  /nix/store/ip0lr151j9klbw3mq2n15wc6bsg0jjr8-linux-headers-6.12.7/include/asm-generic/errno.h \
+  /nix/store/ip0lr151j9klbw3mq2n15wc6bsg0jjr8-linux-headers-6.12.7/include/asm-generic/errno-base.h \
+  /nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/types/error_t.h \
+  /nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/stdlib.h \
+  /nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/libc-header-start.h \
+  /nix/store/5markp3r3imr3crfmb99xgvahmcxyjlq-clang-wrapper-13.0.1/resource-root/include/stddef.h \
+  /nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/waitflags.h \
+  /nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/waitstatus.h \
+  /nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/floatn.h \
+  /nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/floatn-common.h \
+  /nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/types/locale_t.h \
+  /nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/types/__locale_t.h \
+  /nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/sys/types.h \
+  /nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/types.h \
+  /nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/typesizes.h \
+  /nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/time64.h \
+  /nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/types/clock_t.h \
+  /nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/types/clockid_t.h \
+  /nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/types/time_t.h \
+  /nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/types/timer_t.h \
+  /nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/stdint-intn.h \
+  /nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/endian.h \
+  /nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/endian.h \
+  /nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/endianness.h \
+  /nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/byteswap.h \
+  /nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/uintn-identity.h \
+  /nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/sys/select.h \
+  /nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/select.h \
+  /nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/types/sigset_t.h \
+  /nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/types/__sigset_t.h \
+  /nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/types/struct_timeval.h \
+  /nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/types/struct_timespec.h \
+  /nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/pthreadtypes.h \
+  /nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/thread-shared-types.h \
+  /nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/pthreadtypes-arch.h \
+  /nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/atomic_wide_counter.h \
+  /nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/struct_mutex.h \
+  /nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/struct_rwlock.h \
+  alloca.h \
+  /nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/stdlib-float.h \
+  /nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/string.h \
+  /nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/strings.h \
+  /nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/unistd.h \
+  /nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/posix_opt.h \
+  /nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/environments.h \
+  /nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/confname.h \
+  /nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/getopt_posix.h \
+  /nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/getopt_core.h \
+  /nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/unistd_ext.h \
+  /nix/store/ip0lr151j9klbw3mq2n15wc6bsg0jjr8-linux-headers-6.12.7/include/linux/close_range.h \
+  /nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/sys/stat.h \
+  /nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/stat.h \
+  /nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/struct_stat.h \
+  /nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/statx.h \
+  /nix/store/ip0lr151j9klbw3mq2n15wc6bsg0jjr8-linux-headers-6.12.7/include/linux/stat.h \
+  /nix/store/ip0lr151j9klbw3mq2n15wc6bsg0jjr8-linux-headers-6.12.7/include/linux/types.h \
+  /nix/store/ip0lr151j9klbw3mq2n15wc6bsg0jjr8-linux-headers-6.12.7/include/asm/types.h \
+  /nix/store/ip0lr151j9klbw3mq2n15wc6bsg0jjr8-linux-headers-6.12.7/include/asm-generic/types.h \
+  /nix/store/ip0lr151j9klbw3mq2n15wc6bsg0jjr8-linux-headers-6.12.7/include/asm-generic/int-ll64.h \
+  /nix/store/ip0lr151j9klbw3mq2n15wc6bsg0jjr8-linux-headers-6.12.7/include/asm/bitsperlong.h \
+  /nix/store/ip0lr151j9klbw3mq2n15wc6bsg0jjr8-linux-headers-6.12.7/include/asm-generic/bitsperlong.h \
+  /nix/store/ip0lr151j9klbw3mq2n15wc6bsg0jjr8-linux-headers-6.12.7/include/linux/posix_types.h \
+  /nix/store/ip0lr151j9klbw3mq2n15wc6bsg0jjr8-linux-headers-6.12.7/include/linux/stddef.h \
+  /nix/store/ip0lr151j9klbw3mq2n15wc6bsg0jjr8-linux-headers-6.12.7/include/asm/posix_types.h \
+  /nix/store/ip0lr151j9klbw3mq2n15wc6bsg0jjr8-linux-headers-6.12.7/include/asm/posix_types_64.h \
+  /nix/store/ip0lr151j9klbw3mq2n15wc6bsg0jjr8-linux-headers-6.12.7/include/asm-generic/posix_types.h \
+  /nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/statx-generic.h \
+  /nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/types/struct_statx_timestamp.h \
+  /nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/types/struct_statx.h \
+  filename.h concat-filename.h
+
+../src/config.h:
+
+findprog.h:
+
+stdbool.h:
+
+/nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/errno.h:
+
+/nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/features.h:
+
+/nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/features-time64.h:
+
+/nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/wordsize.h:
+
+/nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/timesize.h:
+
+/nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/stdc-predef.h:
+
+/nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/sys/cdefs.h:
+
+/nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/long-double.h:
+
+/nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/gnu/stubs.h:
+
+/nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/gnu/stubs-64.h:
+
+/nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/errno.h:
+
+/nix/store/ip0lr151j9klbw3mq2n15wc6bsg0jjr8-linux-headers-6.12.7/include/linux/errno.h:
+
+/nix/store/ip0lr151j9klbw3mq2n15wc6bsg0jjr8-linux-headers-6.12.7/include/asm/errno.h:
+
+/nix/store/ip0lr151j9klbw3mq2n15wc6bsg0jjr8-linux-headers-6.12.7/include/asm-generic/errno.h:
+
+/nix/store/ip0lr151j9klbw3mq2n15wc6bsg0jjr8-linux-headers-6.12.7/include/asm-generic/errno-base.h:
+
+/nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/types/error_t.h:
+
+/nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/stdlib.h:
+
+/nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/libc-header-start.h:
+
+/nix/store/5markp3r3imr3crfmb99xgvahmcxyjlq-clang-wrapper-13.0.1/resource-root/include/stddef.h:
+
+/nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/waitflags.h:
+
+/nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/waitstatus.h:
+
+/nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/floatn.h:
+
+/nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/floatn-common.h:
+
+/nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/types/locale_t.h:
+
+/nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/types/__locale_t.h:
+
+/nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/sys/types.h:
+
+/nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/types.h:
+
+/nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/typesizes.h:
+
+/nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/time64.h:
+
+/nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/types/clock_t.h:
+
+/nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/types/clockid_t.h:
+
+/nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/types/time_t.h:
+
+/nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/types/timer_t.h:
+
+/nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/stdint-intn.h:
+
+/nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/endian.h:
+
+/nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/endian.h:
+
+/nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/endianness.h:
+
+/nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/byteswap.h:
+
+/nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/uintn-identity.h:
+
+/nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/sys/select.h:
+
+/nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/select.h:
+
+/nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/types/sigset_t.h:
+
+/nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/types/__sigset_t.h:
+
+/nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/types/struct_timeval.h:
+
+/nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/types/struct_timespec.h:
+
+/nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/pthreadtypes.h:
+
+/nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/thread-shared-types.h:
+
+/nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/pthreadtypes-arch.h:
+
+/nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/atomic_wide_counter.h:
+
+/nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/struct_mutex.h:
+
+/nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/struct_rwlock.h:
+
+alloca.h:
+
+/nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/stdlib-float.h:
+
+/nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/string.h:
+
+/nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/strings.h:
+
+/nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/unistd.h:
+
+/nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/posix_opt.h:
+
+/nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/environments.h:
+
+/nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/confname.h:
+
+/nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/getopt_posix.h:
+
+/nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/getopt_core.h:
+
+/nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/unistd_ext.h:
+
+/nix/store/ip0lr151j9klbw3mq2n15wc6bsg0jjr8-linux-headers-6.12.7/include/linux/close_range.h:
+
+/nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/sys/stat.h:
+
+/nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/stat.h:
+
+/nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/struct_stat.h:
+
+/nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/statx.h:
+
+/nix/store/ip0lr151j9klbw3mq2n15wc6bsg0jjr8-linux-headers-6.12.7/include/linux/stat.h:
+
+/nix/store/ip0lr151j9klbw3mq2n15wc6bsg0jjr8-linux-headers-6.12.7/include/linux/types.h:
+
+/nix/store/ip0lr151j9klbw3mq2n15wc6bsg0jjr8-linux-headers-6.12.7/include/asm/types.h:
+
+/nix/store/ip0lr151j9klbw3mq2n15wc6bsg0jjr8-linux-headers-6.12.7/include/asm-generic/types.h:
+
+/nix/store/ip0lr151j9klbw3mq2n15wc6bsg0jjr8-linux-headers-6.12.7/include/asm-generic/int-ll64.h:
+
+/nix/store/ip0lr151j9klbw3mq2n15wc6bsg0jjr8-linux-headers-6.12.7/include/asm/bitsperlong.h:
+
+/nix/store/ip0lr151j9klbw3mq2n15wc6bsg0jjr8-linux-headers-6.12.7/include/asm-generic/bitsperlong.h:
+
+/nix/store/ip0lr151j9klbw3mq2n15wc6bsg0jjr8-linux-headers-6.12.7/include/linux/posix_types.h:
+
+/nix/store/ip0lr151j9klbw3mq2n15wc6bsg0jjr8-linux-headers-6.12.7/include/linux/stddef.h:
+
+/nix/store/ip0lr151j9klbw3mq2n15wc6bsg0jjr8-linux-headers-6.12.7/include/asm/posix_types.h:
+
+/nix/store/ip0lr151j9klbw3mq2n15wc6bsg0jjr8-linux-headers-6.12.7/include/asm/posix_types_64.h:
+
+/nix/store/ip0lr151j9klbw3mq2n15wc6bsg0jjr8-linux-headers-6.12.7/include/asm-generic/posix_types.h:
+
+/nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/statx-generic.h:
+
+/nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/types/struct_statx_timestamp.h:
+
+/nix/store/r25srliigrrv5q3n7y8ms6z10spvjcd9-glibc-2.40-66-dev/include/bits/types/struct_statx.h:
+
+filename.h:
+
+concat-filename.h:

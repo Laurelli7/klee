@@ -10,6 +10,7 @@
 #include "UserSearcher.h"
 
 #include "Executor.h"
+#include "LLMGuidedSearcher.h"
 #include "MergeHandler.h"
 #include "Searcher.h"
 
@@ -54,7 +55,11 @@ cl::list<Searcher::CoreSearchType> CoreSearch(
         /* [Empc]: Empc searcher option */
         clEnumValN(Searcher::Empc, "empc", "use Empc"),
         /* [SGS]: Subpath guided searcher */
-        clEnumValN(Searcher::SGS, "sgs", "use SGS (subpath guided searcher)")),
+        clEnumValN(Searcher::SGS, "sgs", "use SGS (subpath guided searcher)"),
+        /* LLM-guided dynamic searcher */
+        clEnumValN(Searcher::LLMGuided, "llm",
+                   "use LLM-guided searcher that queries LLM to decide "
+                   "strategy per function")),
     cl::cat(SearchCat));
 
 cl::opt<bool> UseIterativeDeepeningTimeSearch(
@@ -97,7 +102,7 @@ void initializeSearchOptions() {
 }
 
 bool userSearcherRequiresMD2U() {
-  return (std::find(CoreSearch.begin(), CoreSearch.end(),
+  return std::find(CoreSearch.begin(), CoreSearch.end(),
                     Searcher::NURS_MD2U) != CoreSearch.end() ||
           std::find(CoreSearch.begin(), CoreSearch.end(),
                     Searcher::NURS_CovNew) != CoreSearch.end() ||
@@ -106,12 +111,14 @@ bool userSearcherRequiresMD2U() {
           std::find(CoreSearch.begin(), CoreSearch.end(),
                     Searcher::NURS_CPICnt) != CoreSearch.end() ||
           std::find(CoreSearch.begin(), CoreSearch.end(), Searcher::NURS_QC) !=
-              CoreSearch.end());
+              CoreSearch.end();
 }
 
 bool userSearcherRequiresInMemoryExecutionTree() {
   return std::find(CoreSearch.begin(), CoreSearch.end(),
-                   Searcher::RandomPath) != CoreSearch.end();
+                   Searcher::RandomPath) != CoreSearch.end() ||
+         std::find(CoreSearch.begin(), CoreSearch.end(),
+                   Searcher::LLMGuided) != CoreSearch.end();
 }
 
 // [Empc]: `SearcherGraph` is required
@@ -186,6 +193,9 @@ Searcher *getNewSearcher(Searcher::CoreSearchType type, RNG &rng,
 
     searcher = new InterleavedSearcher(s);
   } break;
+  case Searcher::LLMGuided:
+    searcher = new LLMGuidedSearcher(executor, rng, executionTree);
+    break;
   }
 
   return searcher;
