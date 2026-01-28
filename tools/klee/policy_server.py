@@ -133,16 +133,42 @@ def log(msg: str):
         _log_file.write(line + "\n")
         _log_file.flush()  # Ensure immediate write
 
+# Default system prompt - gives the LLM persistent context
+DEFAULT_SYSTEM_PROMPT = """You are an expert symbolic execution strategist for KLEE.
+Your goal is to maximize CODE COVERAGE and TEST CASE GENERATION.
+{program_context}
+Key principles:
+1. Coverage requires COMPLETING paths (generating ktests), not just exploring
+2. Many active states with few completed tests = need DFS to finish paths
+3. Coverage stall = try random-path to escape local optima
+4. High solver time = use nurs:qc to avoid expensive queries
+5. State near termination (low dist_to_return, shallow stack) = prioritize completion with DFS
+
+Always respond with:
+REASONING: <brief explanation>
+CHOICE: <searcher name>"""
+
 
 class PolicyServer:
-    def __init__(self, socket_path: str, provider: str, model: str = None, verbose: bool = False):
+    def __init__(self, socket_path: str, provider: str, model: str = None, 
+                 verbose: bool = False, system_prompt: str = None, program: str = None):
         self.socket_path = socket_path
         self.provider = provider
         self.model = model
         self.verbose = verbose
+        self.program = program
         self.sock = None
         self.llm_client = None
         self.query_count = 0
+        
+        # Build system prompt with program context
+        if system_prompt:
+            self.system_prompt = system_prompt
+        else:
+            program_context = ""
+            if program:
+                program_context = f"\nYou are analyzing: **{program}**\n"
+            self.system_prompt = DEFAULT_SYSTEM_PROMPT.format(program_context=program_context)
         
         # Initialize LLM client
         if provider == "openai":
@@ -174,6 +200,8 @@ class PolicyServer:
         log(f"Socket path: {self.socket_path}")
         log(f"LLM Provider: {self.provider}")
         log(f"LLM Model: {self.model}")
+        if self.program:
+            log(f"Program: {self.program}")
         log(f"Verbose mode: {self.verbose}")
         log("=" * 70)
         log("Waiting for KLEE to connect...")
@@ -223,16 +251,21 @@ class PolicyServer:
                             schema = {}
                         
                         func_name = features.get('function', 'unknown')
+                        query_type = features.get('query_type', 'function')
+                        health_status = features.get('health_status', '')
                         
-                        # ============ FILTER: Skip libc functions ============
-                        if is_libc_function(func_name):
+                        # ============ FILTER: Skip libc functions (only for function queries) ============
+                        if query_type == 'function' and is_libc_function(func_name):
                             # Log skip reason and use default
                             log(f"[SKIP] {func_name} (libc) -> {DEFAULT_LIBC_SEARCHER}")
                             conn.send((DEFAULT_LIBC_SEARCHER + "\n").encode())
                             continue
                         
                         # ============ LOG: RECEIVED FROM KLEE ============
-                        log(f"[QUERY] {func_name}")
+                        if query_type == 'health':
+                            log(f"[HEALTH] {health_status} (in {func_name})")
+                        else:
+                            log(f"[QUERY] {func_name}")
                         
                         # Verbose: show all state features
                         if self.verbose:
@@ -242,13 +275,18 @@ class PolicyServer:
                                     log(f"  {key}: {value}")
                         
                         # Query LLM
-                        strategy, llm_raw_response, prompt = self.query_llm_with_logging(features, schema)
+                        query_type = features.get('query_type', 'function')
+                        strategy, llm_raw_response, prompt = self.query_llm_with_logging(
+                            features, schema, query_type)
                         
                         # Send response to KLEE
                         conn.send((strategy + "\n").encode())
                         
                         # ============ LOG: SENT TO KLEE ============
-                        log(f"[RESPONSE] {func_name} -> {strategy}")
+                        if query_type == 'health':
+                            log(f"[RESPONSE] Health({health_status}) -> {strategy}")
+                        else:
+                            log(f"[RESPONSE] {func_name} -> {strategy}")
                             
                     except json.JSONDecodeError as e:
                         log(f"JSON PARSE ERROR: {e}")
@@ -266,9 +304,12 @@ class PolicyServer:
         finally:
             conn.close()
     
-    def query_llm_with_logging(self, features: dict, schema: dict) -> tuple:
+    def query_llm_with_logging(self, features: dict, schema: dict, query_type: str = "function") -> tuple:
         """Query the LLM and return (strategy, raw_response, prompt)."""
-        prompt = self._build_prompt(features, schema)
+        if query_type == "health":
+            prompt = self._build_health_prompt(features, schema)
+        else:
+            prompt = self._build_prompt(features, schema)
         
         # ============ LOG: PROMPT SENT TO LLM (verbose only) ============
         if self.verbose:
@@ -296,9 +337,13 @@ class PolicyServer:
     
     def _query_openai_raw(self, prompt: str) -> str:
         """Query OpenAI API and return raw response."""
+        messages = [
+            {"role": "system", "content": self.system_prompt},
+            {"role": "user", "content": prompt}
+        ]
         response = self.llm_client.chat.completions.create(
             model=self.model,
-            messages=[{"role": "user", "content": prompt}],
+            messages=messages,
             temperature=0.1,
             max_tokens=150  # Allow room for reasoning
         )
@@ -309,6 +354,7 @@ class PolicyServer:
         response = self.llm_client.messages.create(
             model=self.model,
             max_tokens=150,  # Allow room for reasoning
+            system=self.system_prompt,
             messages=[{"role": "user", "content": prompt}]
         )
         return response.content[0].text.strip()
@@ -395,10 +441,91 @@ Key factors to consider:
 5. min_dist_to_uncovered - low means close to new code, use nurs:md2u or nurs:covnew
 6. active_states - many states means state explosion, may need to focus with dfs/bfs
 7. solver_time - high means expensive queries, consider nurs:qc
+8. **near_termination** - if true, this state is close to completing and generating a test case!
+   - Use DFS or nurs:depth to push it to completion
+9. **state_dist_to_return** - low value means this state is close to returning
+   - Combined with low stack_depth, indicates imminent test generation
+10. **completed_states** - if low relative to active_states, focus on completing paths (use DFS)
 
 ## Response Format
 Respond in exactly this format:
 REASONING: <1-2 sentences explaining your analysis>
+CHOICE: <searcher name>"""
+
+    def _build_health_prompt(self, features: dict, schema: dict) -> str:
+        """Build prompt for health-based queries."""
+        
+        health_status = features.get('health_status', 'unknown')
+        func_name = features.get('function', 'unknown')
+        
+        # Parse health issues
+        issues = health_status.split(',') if health_status else []
+        
+        # Build issue explanation
+        issue_explanations = []
+        for issue in issues:
+            if issue == 'coverage_stalled':
+                issue_explanations.append("⚠️ **Coverage Stalled**: No new code has been covered for multiple check intervals. The current strategy may be stuck in a local minimum.")
+            elif issue == 'state_explosion':
+                issue_explanations.append(f"⚠️ **State Explosion**: {features.get('active_states', '?')} states are active. Too many parallel execution paths are being explored.")
+            elif issue == 'solver_pressure':
+                issue_explanations.append("⚠️ **Solver Pressure**: SMT solver is consuming >70% of execution time. Complex constraints are slowing exploration.")
+            elif issue == 'memory_pressure':
+                issue_explanations.append("⚠️ **Memory Pressure**: High constraint counts with many states indicate potential memory exhaustion.")
+            elif issue == 'low_test_generation':
+                issue_explanations.append(f"⚠️ **Low Test Generation**: {features.get('active_states', '?')} states but only {features.get('completed_states', '?')} tests generated. States are not completing - need to push paths to termination.")
+        
+        issues_text = "\n".join(issue_explanations) if issue_explanations else "Unknown health issue"
+        
+        # Key metrics
+        metrics_text = f"""## Current Metrics
+- Active States: {features.get('active_states', '?')}
+- Completed States (ktests): {features.get('completed_states', '?')}
+- Covered Instructions: {features.get('covered_instructions', '?')}
+- Uncovered Instructions: {features.get('uncovered_instructions', '?')}
+- Current Function: {func_name}
+- Constraints: {features.get('constraints', '?')}
+- Solver Time (μs): {features.get('solver_time_us', '?')}
+- Instructions Since New Coverage: {features.get('insts_since_cov_new', '?')}
+- Total Forks: {features.get('total_forks', '?')}
+- State Distance to Return: {features.get('state_dist_to_return', '?')}
+- Near Termination: {features.get('near_termination', '?')}"""
+
+        return f"""You are a symbolic execution expert. KLEE has detected a health issue that requires strategy adjustment.
+
+## Health Alert
+{issues_text}
+
+{metrics_text}
+
+## Recommended Strategies by Issue
+
+**Coverage Stalled:**
+- `random-path` or `random-state`: Add randomness to escape local optima
+- `nurs:md2u`: Target uncovered code directly
+
+**State Explosion:**
+- `dfs`: Focus on completing paths to reduce state count
+- `bfs`: Systematically explore breadth before going deeper
+
+**Solver Pressure:**
+- `nurs:qc`: Deprioritize states with expensive queries
+- `dfs`: Simpler paths often have simpler constraints
+
+**Memory Pressure:**
+- `dfs`: Complete and terminate states to free memory
+- `nurs:icnt`: Favor states that have done less work
+
+**Low Test Generation:**
+- `dfs`: STRONGLY RECOMMENDED - drives paths to completion, generates ktests
+- `nurs:depth`: Prioritize deep states that are close to finishing
+- States need to COMPLETE to generate test cases (ktests)
+
+## Your Task
+Choose the BEST searcher to address the health issue(s) while maintaining good coverage progress.
+
+## Response Format
+REASONING: <1-2 sentences explaining why this addresses the health issue>
 CHOICE: <searcher name>"""
 
 
@@ -413,11 +540,26 @@ def main():
                         help="Verbose output (show full prompts)")
     parser.add_argument("--log", "-l", metavar="FILE",
                         help="Log file path (e.g., policy_server.log)")
+    parser.add_argument("--system-prompt", "-s", metavar="FILE",
+                        help="File containing custom system prompt (overrides default)")
+    parser.add_argument("--program", "-p", metavar="NAME",
+                        help="Name of program being analyzed (e.g., 'GNU Make', 'coreutils')")
     args = parser.parse_args()
     
     # Initialize log file if specified
     if args.log:
         init_log_file(args.log)
+    
+    # Load custom system prompt if specified
+    system_prompt = None
+    if args.system_prompt:
+        try:
+            with open(args.system_prompt, 'r') as f:
+                system_prompt = f.read()
+            log(f"Loaded system prompt from: {args.system_prompt}")
+        except Exception as e:
+            print(f"Error loading system prompt: {e}")
+            sys.exit(1)
     
     # Check for API keys
     if args.provider == "openai":
@@ -436,7 +578,9 @@ def main():
             socket_path=args.socket,
             provider=args.provider,
             model=args.model,
-            verbose=args.verbose
+            verbose=args.verbose,
+            system_prompt=system_prompt,
+            program=args.program
         )
         server.start()
     except Exception as e:

@@ -54,6 +54,21 @@ namespace {
       "policy-default",
       cl::desc("Default searcher when policy server unavailable (default=nurs:covnew)"),
       cl::init("nurs:covnew"));
+
+  cl::opt<unsigned> HealthCheckInterval(
+      "policy-health-interval",
+      cl::desc("Instructions between health checks (default=1000)"),
+      cl::init(1000));
+
+  cl::opt<unsigned> CoverageStallThreshold(
+      "policy-stall-threshold",
+      cl::desc("Health checks without coverage progress to trigger stall (default=5)"),
+      cl::init(5));
+
+  cl::opt<unsigned> StateExplosionThreshold(
+      "policy-explosion-threshold",
+      cl::desc("Number of states to consider 'explosion' (default=500)"),
+      cl::init(500));
 }
 
 //===----------------------------------------------------------------------===//
@@ -63,11 +78,14 @@ namespace {
 std::string StateFeatures::toJson() const {
   std::ostringstream ss;
   ss << "{"
+     // Query type and health status
+     << "\"query_type\":\"" << queryType << "\","
+     << "\"health_status\":\"" << healthStatus << "\","
      // Schema - explains each field to the LLM
      << "\"_schema\":{"
      << "\"function\":\"Current function name being executed\","
      << "\"signature\":\"Function type signature\","
-     << "\"stack_depth\":\"Call stack depth\","
+     << "\"stack_depth\":\"Call stack depth (1 = in main)\","
      << "\"constraints\":\"Number of symbolic constraints (more = harder to solve)\","
      << "\"depth\":\"Execution depth - branches taken to reach this state\","
      << "\"stepped_instructions\":\"Total instructions executed by this state\","
@@ -85,7 +103,11 @@ std::string StateFeatures::toJson() const {
      << "\"solver_time_us\":\"Microseconds in constraint solver\","
      << "\"fork_time_us\":\"Microseconds forking states\","
      << "\"min_dist_to_uncovered\":\"Distance to nearest uncovered code\","
-     << "\"min_dist_to_return\":\"Distance to function return\""
+     << "\"min_dist_to_return\":\"Distance to function return\","
+     << "\"state_dist_to_return\":\"THIS STATE's distance to return (low = close to generating ktest)\","
+     << "\"in_main_function\":\"True if executing in main()\","
+     << "\"near_termination\":\"True if state is close to completing (will generate ktest soon)\","
+     << "\"completed_states\":\"Total states that have terminated (ktests generated)\""
      << "},"
      // Actual data
      << "\"data\":{"
@@ -109,7 +131,11 @@ std::string StateFeatures::toJson() const {
      << "\"solver_time_us\":" << solverTime << ","
      << "\"fork_time_us\":" << forkTime << ","
      << "\"min_dist_to_uncovered\":" << minDistToUncovered << ","
-     << "\"min_dist_to_return\":" << minDistToReturn
+     << "\"min_dist_to_return\":" << minDistToReturn << ","
+     << "\"state_dist_to_return\":" << stateDistToReturn << ","
+     << "\"in_main_function\":" << (inMainFunction ? "true" : "false") << ","
+     << "\"near_termination\":" << (nearTermination ? "true" : "false") << ","
+     << "\"completed_states\":" << completedStates
      << "}"
      << "}";
   return ss.str();
@@ -309,6 +335,10 @@ std::string LLMGuidedSearcher::getFunctionSignature(ExecutionState *state) const
 StateFeatures LLMGuidedSearcher::buildFeatures(ExecutionState *state) const {
   StateFeatures f;
   
+  // Default query type is "function" (overridden for health queries)
+  f.queryType = "function";
+  f.healthStatus = "";
+  
   f.functionName = getCurrentFunction(state);
   f.functionSignature = getFunctionSignature(state);
   f.stackDepth = state->stack.size();
@@ -319,7 +349,9 @@ StateFeatures LLMGuidedSearcher::buildFeatures(ExecutionState *state) const {
   f.coveredNew = state->coveredNew;
   f.symbolicVarCount = state->symbolics.size();
   
-  f.activeStates = stats::states;
+  // NOTE: stats::states is an indexed-only statistic (always 0 globally)
+  // We track state count ourselves via update() calls
+  f.activeStates = trackedStateCount;
   f.totalForks = stats::forks;
   f.inhibitedForks = stats::inhibitedForks;
   f.coveredInstructions = stats::coveredInstructions;
@@ -333,6 +365,29 @@ StateFeatures LLMGuidedSearcher::buildFeatures(ExecutionState *state) const {
   
   f.minDistToUncovered = stats::minDistToUncovered;
   f.minDistToReturn = stats::minDistToReturn;
+  
+  // Per-state completion proximity metrics
+  // Get this state's distance to return from the indexed statistics
+  if (state->pc && state->pc->info) {
+    f.stateDistToReturn = theStatisticManager->getIndexedValue(
+        stats::minDistToReturn, state->pc->info->id);
+  } else {
+    f.stateDistToReturn = UINT_MAX;
+  }
+  
+  // Check if we're in main
+  f.inMainFunction = (f.functionName == "main");
+  
+  // A state is "near termination" if:
+  // - Distance to return is small (< 10 instructions)
+  // - AND we're close to the top of the call stack (depth <= 2)
+  // This means we're likely to generate a ktest soon
+  f.nearTermination = (f.stateDistToReturn > 0 && 
+                       f.stateDistToReturn <= 10 && 
+                       f.stackDepth <= 2);
+  
+  // Count completed states (successful exits generate ktests)
+  f.completedStates = stats::terminationExit;
   
   return f;
 }
@@ -373,29 +428,49 @@ void LLMGuidedSearcher::update(ExecutionState *current,
     }
   }
   
-  // Check if we should query the policy server
-  if (current && !removedStates.empty()) {
-    // State terminated - might want to reconsider strategy
+  // Track state count ourselves since stats::states is indexed-only (always 0)
+  trackedStateCount += addedStates.size();
+  trackedStateCount -= removedStates.size();
+  
+  if (!current) return;
+  
+  // ===== Global Health Monitoring =====
+  // Increment instruction counter for health check timing
+  instructionsSinceHealthCheck++;
+  
+  // Periodic health check
+  if (instructionsSinceHealthCheck >= HealthCheckInterval) {
+    instructionsSinceHealthCheck = 0;
+    
+    std::string healthStatus = checkGlobalHealth(current);
+    
+    // Only query LLM if health status changed and is not healthy
+    if (healthStatus != "healthy" && healthStatus != lastHealthStatus) {
+      lastHealthStatus = healthStatus;
+      queryOnHealthChange(current, healthStatus);
+    } else if (healthStatus == "healthy") {
+      lastHealthStatus = healthStatus;
+    }
   }
   
-  if (current) {
-    std::string newFunc = getCurrentFunction(current);
+  // ===== Function-based Query =====
+  std::string newFunc = getCurrentFunction(current);
+  
+  // Query LLM when entering a new function
+  if (newFunc != lastFunction && !newFunc.empty()) {
+    lastFunction = newFunc;
+    policyQueries++;
     
-    // Query LLM when entering a new function
-    if (newFunc != lastFunction && !newFunc.empty()) {
-      lastFunction = newFunc;
-      policyQueries++;
+    StateFeatures features = buildFeatures(current);
+    std::string decision = policyClient->query(features);
+    
+    if (!decision.empty()) {
+      // Normalize the response (lowercase, handle variations)
+      std::string normalized = decision;
+      std::transform(normalized.begin(), normalized.end(), 
+                     normalized.begin(), ::tolower);
       
-      StateFeatures features = buildFeatures(current);
-      std::string decision = policyClient->query(features);
-      
-      if (!decision.empty()) {
-        // Normalize the response (lowercase, handle variations)
-        std::string normalized = decision;
-        std::transform(normalized.begin(), normalized.end(), 
-                       normalized.begin(), ::tolower);
-        
-        // Try exact match first (policy server should return exact names)
+      // Try exact match first (policy server should return exact names)
         if (searchers.count(normalized)) {
           switchSearcher(normalized);
         }
@@ -439,6 +514,134 @@ void LLMGuidedSearcher::update(ExecutionState *current,
                        << " -> " << currentSearcherName << "\n";
         }
       }
+    }
+}
+
+//===----------------------------------------------------------------------===//
+// Global Health Monitoring
+//===----------------------------------------------------------------------===//
+
+std::string LLMGuidedSearcher::checkGlobalHealth(ExecutionState *state) {
+  unsigned currentCovered = stats::coveredInstructions;
+  unsigned currentBranches = stats::trueBranches + stats::falseBranches;
+  // NOTE: stats::states is indexed-only (always 0), use our tracked count
+  unsigned currentStates = trackedStateCount;
+  unsigned currentCompleted = stats::terminationExit;
+  
+  std::vector<std::string> issues;
+  
+  // Check for coverage stall
+  if (currentCovered == lastCoveredInstructions && 
+      currentBranches == lastCoveredBranches) {
+    coverageStallCounter++;
+    if (coverageStallCounter >= CoverageStallThreshold) {
+      issues.push_back("coverage_stalled");
+    }
+  } else {
+    // Coverage progressing - reset counter
+    coverageStallCounter = 0;
+    lastCoveredInstructions = currentCovered;
+    lastCoveredBranches = currentBranches;
+  }
+  
+  // Check for test generation stall (many states but no new ktests)
+  if (currentCompleted == lastCompletedStates && currentStates > 50) {
+    testGenStallCounter++;
+    if (testGenStallCounter >= CoverageStallThreshold) {
+      issues.push_back("low_test_generation");
+    }
+  } else {
+    testGenStallCounter = 0;
+    lastCompletedStates = currentCompleted;
+  }
+  
+  // Check for state explosion
+  if (currentStates > StateExplosionThreshold) {
+    issues.push_back("state_explosion");
+  }
+  if (currentStates > peakStates) {
+    peakStates = currentStates;
+  }
+  
+  // Check for solver pressure (high solver time relative to total time)
+  uint64_t totalTime = stats::solverTime + stats::forkTime + 1; // avoid div by 0
+  double solverRatio = static_cast<double>(stats::solverTime) / totalTime;
+  if (solverRatio > 0.7) {
+    issues.push_back("solver_pressure");
+  }
+  
+  // Check for memory pressure (many states with high constraint counts)
+  if (state && state->constraints.size() > 50 && currentStates > 100) {
+    issues.push_back("memory_pressure");
+  }
+  
+  // Build status string
+  if (issues.empty()) {
+    return "healthy";
+  }
+  
+  std::string status;
+  for (size_t i = 0; i < issues.size(); i++) {
+    if (i > 0) status += ",";
+    status += issues[i];
+  }
+  return status;
+}
+
+void LLMGuidedSearcher::queryOnHealthChange(ExecutionState *state, 
+                                            const std::string &healthStatus) {
+  healthQueries++;
+  
+  StateFeatures features = buildFeatures(state);
+  features.queryType = "health";
+  features.healthStatus = healthStatus;
+  
+  std::string decision = policyClient->query(features);
+  
+  if (!decision.empty()) {
+    std::string normalized = decision;
+    std::transform(normalized.begin(), normalized.end(), 
+                   normalized.begin(), ::tolower);
+    
+    // Same parsing logic as function-based queries
+    if (searchers.count(normalized)) {
+      switchSearcher(normalized);
+    } else if (normalized.find("dfs") != std::string::npos &&
+               normalized.find("bfs") == std::string::npos) {
+      switchSearcher("dfs");
+    } else if (normalized.find("bfs") != std::string::npos) {
+      switchSearcher("bfs");
+    } else if (normalized.find("random-path") != std::string::npos || 
+               normalized.find("randompath") != std::string::npos) {
+      if (searchers.count("random-path")) {
+        switchSearcher("random-path");
+      }
+    } else if (normalized.find("random-state") != std::string::npos ||
+               normalized.find("randomstate") != std::string::npos) {
+      switchSearcher("random-state");
+    } else if (normalized.find("md2u") != std::string::npos || 
+               normalized.find("mindist") != std::string::npos) {
+      switchSearcher("nurs:md2u");
+    } else if (normalized.find("nurs:depth") != std::string::npos) {
+      switchSearcher("nurs:depth");
+    } else if (normalized.find("nurs:rp") != std::string::npos) {
+      switchSearcher("nurs:rp");
+    } else if (normalized.find("cpicnt") != std::string::npos) {
+      switchSearcher("nurs:cpicnt");
+    } else if (normalized.find("icnt") != std::string::npos || 
+               normalized.find("instcount") != std::string::npos) {
+      switchSearcher("nurs:icnt");
+    } else if (normalized.find("qc") != std::string::npos || 
+               normalized.find("querycost") != std::string::npos) {
+      switchSearcher("nurs:qc");
+    } else if (normalized.find("covnew") != std::string::npos || 
+               normalized.find("coverage") != std::string::npos) {
+      switchSearcher("nurs:covnew");
+    }
+    
+    if (PolicyVerbose) {
+      llvm::errs() << "[Policy] Health: " << healthStatus 
+                   << " -> " << currentSearcherName << "\n";
     }
   }
 }
