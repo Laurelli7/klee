@@ -1,13 +1,15 @@
-///===-- LLMGuidedSearcher.cpp - Policy-server guided search ----*- C++ -*-===//
+///===-- LLMGuidedSearcher.cpp - Async policy-server guided search -*- C++ -*-//
 ///
-/// Implementation of searcher that delegates to real KLEE searchers
-/// based on decisions from an external LLM policy server.
+/// Fully asynchronous searcher: KLEE main loop NEVER blocks on LLM.
+/// A background thread handles all socket I/O. The main thread sends
+/// features fire-and-forget and picks up responses when they arrive.
 ///
 ///===----------------------------------------------------------------------===//
 
 #include "LLMGuidedSearcher.h"
 #include "CoreStats.h"
 #include "Executor.h"
+#include "SearcherDefs.h"
 #include "klee/Module/KInstruction.h"
 #include "klee/Statistics/Statistics.h"
 
@@ -26,6 +28,7 @@ DISABLE_WARNING_POP
 
 #include <algorithm>
 #include <sstream>
+#include <chrono>
 
 using namespace klee;
 using namespace llvm;
@@ -42,8 +45,8 @@ namespace {
 
   cl::opt<unsigned> PolicyTimeout(
       "policy-timeout",
-      cl::desc("Timeout for policy server response in milliseconds (default=100)"),
-      cl::init(100));
+      cl::desc("Timeout for policy server response in ms (default=30000)"),
+      cl::init(30000));
 
   cl::opt<bool> PolicyVerbose(
       "policy-verbose",
@@ -72,16 +75,14 @@ namespace {
 }
 
 //===----------------------------------------------------------------------===//
-// StateFeatures Implementation
+// StateFeatures::toJson
 //===----------------------------------------------------------------------===//
 
 std::string StateFeatures::toJson() const {
   std::ostringstream ss;
   ss << "{"
-     // Query type and health status
      << "\"query_type\":\"" << queryType << "\","
      << "\"health_status\":\"" << healthStatus << "\","
-     // Schema - explains each field to the LLM
      << "\"_schema\":{"
      << "\"function\":\"Current function name being executed\","
      << "\"signature\":\"Function type signature\","
@@ -104,12 +105,11 @@ std::string StateFeatures::toJson() const {
      << "\"fork_time_us\":\"Microseconds forking states\","
      << "\"min_dist_to_uncovered\":\"Distance to nearest uncovered code\","
      << "\"min_dist_to_return\":\"Distance to function return\","
-     << "\"state_dist_to_return\":\"THIS STATE's distance to return (low = close to generating ktest)\","
+     << "\"state_dist_to_return\":\"THIS STATE's distance to return\","
      << "\"in_main_function\":\"True if executing in main()\","
-     << "\"near_termination\":\"True if state is close to completing (will generate ktest soon)\","
-     << "\"completed_states\":\"Total states that have terminated (ktests generated)\""
+     << "\"near_termination\":\"True if state is close to completing\","
+     << "\"completed_states\":\"Total states that have terminated\""
      << "},"
-     // Actual data
      << "\"data\":{"
      << "\"function\":\"" << functionName << "\","
      << "\"signature\":\"" << functionSignature << "\","
@@ -142,94 +142,173 @@ std::string StateFeatures::toJson() const {
 }
 
 //===----------------------------------------------------------------------===//
-// PolicyClient Implementation (Unix Socket)
+// PolicyClient Implementation (Async, background thread)
 //===----------------------------------------------------------------------===//
 
 PolicyClient::PolicyClient(const std::string &socketPath)
-    : socketPath(socketPath), sockfd(-1) {}
+    : socketPath(socketPath) {}
 
 PolicyClient::~PolicyClient() {
-  disconnect();
+  stop();
 }
 
-bool PolicyClient::connect() {
-  if (sockfd >= 0) return true;
-  
-  sockfd = socket(AF_UNIX, SOCK_STREAM, 0);
-  if (sockfd < 0) {
-    if (PolicyVerbose) {
-      llvm::errs() << "[Policy] Failed to create socket\n";
-    }
-    return false;
+void PolicyClient::start() {
+  if (running.load()) return;
+  shutdownRequested.store(false);
+  running.store(true);
+
+  // Try an eager connection so we can detect issues early
+  llvm::errs() << "[Policy] Starting background I/O thread...\n"
+               << "[Policy] Attempting initial connection to " << socketPath << "\n";
+  if (connectSocket()) {
+    llvm::errs() << "[Policy] Initial connection successful!\n";
+  } else {
+    llvm::errs() << "[Policy] WARNING: Could not connect to " << socketPath
+                 << " - will retry on each query.\n"
+                 << "[Policy] Make sure the policy server is running BEFORE starting KLEE:\n"
+                 << "[Policy]   python3 tools/klee/policy_server.py --provider openai\n";
   }
-  
+
+  ioThread = std::thread(&PolicyClient::ioLoop, this);
+}
+
+void PolicyClient::stop() {
+  if (!running.load()) return;
+
+  {
+    std::lock_guard<std::mutex> lk(sendMutex);
+    shutdownRequested.store(true);
+    sendCv.notify_one();
+  }
+
+  if (ioThread.joinable())
+    ioThread.join();
+
+  disconnectSocket();
+  running.store(false);
+}
+
+void PolicyClient::sendAsync(const StateFeatures &features) {
+  std::string json = features.toJson() + "\n";
+  {
+    std::lock_guard<std::mutex> lk(sendMutex);
+    pendingSend = std::move(json);
+    hasPendingSend = true;
+  }
+  sendCv.notify_one();
+}
+
+bool PolicyClient::tryRecv(std::string &response) {
+  std::lock_guard<std::mutex> lk(recvMutex);
+  if (!hasResponse) return false;
+  response = std::move(pendingResponse);
+  hasResponse = false;
+  return true;
+}
+
+// Background thread: waits for sends, does blocking socket I/O, stores results
+void PolicyClient::ioLoop() {
+  while (!shutdownRequested.load()) {
+    std::string toSend;
+
+    // Wait for something to send (or shutdown)
+    {
+      std::unique_lock<std::mutex> lk(sendMutex);
+      sendCv.wait(lk, [this] {
+        return hasPendingSend || shutdownRequested.load();
+      });
+      if (shutdownRequested.load()) break;
+      toSend = std::move(pendingSend);
+      hasPendingSend = false;
+    }
+
+    // Do the blocking socket I/O on THIS thread (not the main KLEE thread)
+    std::string result = doBlockingQuery(toSend);
+
+    // Store result for the main thread to pick up
+    if (!result.empty()) {
+      std::lock_guard<std::mutex> lk(recvMutex);
+      pendingResponse = std::move(result);
+      hasResponse = true;
+    }
+  }
+}
+
+bool PolicyClient::connectSocket() {
+  if (sockfd >= 0) return true;
+
+  sockfd = socket(AF_UNIX, SOCK_STREAM, 0);
+  if (sockfd < 0) return false;
+
   struct sockaddr_un addr;
   memset(&addr, 0, sizeof(addr));
   addr.sun_family = AF_UNIX;
   strncpy(addr.sun_path, socketPath.c_str(), sizeof(addr.sun_path) - 1);
-  
-  if (::connect(sockfd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-    if (PolicyVerbose) {
-      llvm::errs() << "[Policy] Failed to connect to " << socketPath << "\n";
-    }
+
+  if (::connect(sockfd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+    if (PolicyVerbose)
+      llvm::errs() << "[Policy] Connection failed to " << socketPath
+                   << " (errno=" << errno << "). Will retry on next query.\n";
     close(sockfd);
     sockfd = -1;
     return false;
   }
-  
-  if (PolicyVerbose) {
-    llvm::errs() << "[Policy] Connected to " << socketPath << "\n";
-  }
+
+  llvm::errs() << "[Policy] Connected to policy server at " << socketPath << "\n";
   return true;
 }
 
-void PolicyClient::disconnect() {
+void PolicyClient::disconnectSocket() {
   if (sockfd >= 0) {
     close(sockfd);
     sockfd = -1;
   }
 }
 
-bool PolicyClient::isConnected() const {
-  return sockfd >= 0;
-}
-
-std::string PolicyClient::query(const StateFeatures &features) {
-  if (!isConnected() && !connect()) {
-    return "";  // Empty = use default
-  }
-  
-  std::string msg = features.toJson() + "\n";
-  ssize_t sent = write(sockfd, msg.c_str(), msg.size());
-  if (sent != static_cast<ssize_t>(msg.size())) {
-    disconnect();
+std::string PolicyClient::doBlockingQuery(const std::string &json) {
+  // Try to connect if not connected
+  if (sockfd < 0 && !connectSocket()) {
+    // Periodically log that we can't connect (not every single attempt)
+    static unsigned failCount = 0;
+    if (++failCount % 100 == 1)
+      llvm::errs() << "[Policy] Cannot connect to server (attempt #" << failCount
+                   << "). Running without LLM guidance.\n";
     return "";
   }
-  
+
+  // Send
+  ssize_t sent = write(sockfd, json.c_str(), json.size());
+  if (sent != static_cast<ssize_t>(json.size())) {
+    if (PolicyVerbose)
+      llvm::errs() << "[Policy] Write failed (sent=" << sent
+                   << ", expected=" << json.size() << ", errno=" << errno << ")\n";
+    disconnectSocket();
+    return "";
+  }
+
+  // Wait for response with timeout
   struct pollfd pfd;
   pfd.fd = sockfd;
   pfd.events = POLLIN;
-  
+
   int ret = poll(&pfd, 1, PolicyTimeout);
   if (ret <= 0) {
-    if (PolicyVerbose) {
-      llvm::errs() << "[Policy] Timeout waiting for response\n";
-    }
+    if (PolicyVerbose)
+      llvm::errs() << "[Policy] Timeout waiting for response (" << PolicyTimeout << "ms)\n";
     return "";
   }
-  
+
+  // Read response
   char buf[256];
   ssize_t n = read(sockfd, buf, sizeof(buf) - 1);
   if (n <= 0) {
-    disconnect();
+    disconnectSocket();
     return "";
   }
   buf[n] = '\0';
-  
-  // Trim whitespace
+
   std::string response(buf);
   response.erase(response.find_last_not_of(" \n\r\t") + 1);
-  
   return response;
 }
 
@@ -238,61 +317,91 @@ std::string PolicyClient::query(const StateFeatures &features) {
 //===----------------------------------------------------------------------===//
 
 LLMGuidedSearcher::LLMGuidedSearcher(Executor &executor, RNG &rng,
-                                     InMemoryExecutionTree *executionTree)
+                                       InMemoryExecutionTree *executionTree)
     : executor(executor), theRNG(rng), executionTree(executionTree) {
-  
+
   defaultSearcherName = DefaultSearcher;
   currentSearcherName = defaultSearcherName;
-  
+
   initSearchers();
-  
+
   currentSearcher = searchers[currentSearcherName].get();
   if (!currentSearcher) {
-    // Fallback to nurs:covnew if default is invalid
     currentSearcherName = "nurs:covnew";
     currentSearcher = searchers[currentSearcherName].get();
   }
-  
+
+  // Create and start the async policy client
   policyClient = std::make_unique<PolicyClient>(PolicySocketPath);
-  
+  policyClient->start();
+
   if (PolicyVerbose) {
-    llvm::errs() << "[Policy] LLMGuidedSearcher initialized\n"
+    llvm::errs() << "[Policy] LLMGuidedSearcher initialized (ASYNC mode)\n"
                  << "  Socket: " << PolicySocketPath << "\n"
                  << "  Default: " << defaultSearcherName << "\n"
                  << "  Available searchers: ";
-    for (const auto &kv : searchers) {
+    for (const auto &kv : searchers)
       llvm::errs() << kv.first << " ";
-    }
     llvm::errs() << "\n";
   }
 }
 
 LLMGuidedSearcher::~LLMGuidedSearcher() {
+  // Stop background thread before destroying searchers
+  if (policyClient)
+    policyClient->stop();
+
   if (PolicyVerbose) {
     llvm::errs() << "\n[Policy] Final Statistics\n"
                  << "  Total selections: " << totalSelections << "\n"
-                 << "  Policy queries: " << policyQueries << "\n"
+                 << "  Policy queries sent: " << policyQueries << "\n"
+                 << "  Health queries sent: " << healthQueries << "\n"
+                 << "  Async responses applied: " << asyncResponsesApplied << "\n"
                  << "  Searcher usage:\n";
-    for (const auto &kv : searcherUsage) {
+    for (const auto &kv : searcherUsage)
       llvm::errs() << "    " << kv.first << ": " << kv.second << "\n";
-    }
   }
 }
 
+/// Check if a function name is a libc/runtime function (not application code).
+/// These are skipped for LLM queries - we use the default searcher instead.
+static bool isLibcFunction(const std::string &name) {
+  if (name.empty()) return true;
+  // Prefixes: underscore-prefixed are libc/compiler internals
+  if (name[0] == '_') return true;
+  // Common libc functions
+  static const char *libcNames[] = {
+    "strlen", "strcpy", "strncpy", "strcat", "strncat", "strcmp", "strncmp",
+    "strchr", "strrchr", "strstr", "strdup", "strtok", "strtol", "strtoul",
+    "memcpy", "memmove", "memset", "memcmp", "memchr",
+    "malloc", "calloc", "realloc", "free",
+    "read", "write", "open", "close", "fopen", "fclose", "fread", "fwrite",
+    "fgets", "fputs", "printf", "fprintf", "sprintf", "snprintf",
+    "scanf", "fscanf", "sscanf", "fflush", "fseek", "ftell",
+    "puts", "gets", "perror", "exit", "abort", "atexit",
+    "getenv", "setenv", "getpid", "fork", "execve", "wait", "waitpid",
+    "signal", "sigaction", "kill", "isatty", "ioctl",
+    "isalpha", "isdigit", "isalnum", "isspace", "toupper", "tolower",
+    "qsort", "bsearch", "atoi", "atol", "rand", "srand", "time", "clock",
+    "stat", "fstat", "lstat", "access", "chmod", "mkdir", "rmdir",
+    "getcwd", "chdir", "opendir", "readdir", "closedir",
+    nullptr
+  };
+  for (const char **p = libcNames; *p; ++p)
+    if (name == *p) return true;
+  return false;
+}
+
 void LLMGuidedSearcher::initSearchers() {
-  // Create all available KLEE searchers
-  
   // Basic searchers
   searchers["dfs"] = std::make_unique<DFSSearcher>();
   searchers["bfs"] = std::make_unique<BFSSearcher>();
   searchers["random-state"] = std::make_unique<RandomSearcher>(theRNG);
-  
-  // Random path (needs execution tree)
-  if (executionTree) {
+
+  if (executionTree)
     searchers["random-path"] = std::make_unique<RandomPathSearcher>(executionTree, theRNG);
-  }
-  
-  // NURS variants (WeightedRandomSearcher)
+
+  // NURS variants
   searchers["nurs:covnew"] = std::make_unique<WeightedRandomSearcher>(
       WeightedRandomSearcher::CoveringNew, theRNG);
   searchers["nurs:md2u"] = std::make_unique<WeightedRandomSearcher>(
@@ -307,6 +416,29 @@ void LLMGuidedSearcher::initSearchers() {
       WeightedRandomSearcher::CPInstCount, theRNG);
   searchers["nurs:qc"] = std::make_unique<WeightedRandomSearcher>(
       WeightedRandomSearcher::QueryCost, theRNG);
+
+  // EMPC (if inter-procedural CFG is available from executor)
+  if (executor.mpcICFG && executor.mpcIPDA) {
+    searchers["empc"] = std::make_unique<EmpcSearcher>(
+        executor.mpcICFG, executor.mpcIPDA, theRNG);
+  }
+
+  // SGS: 4 SubpathGuidedSearchers interleaved
+  {
+    std::vector<Searcher *> sgsSearchers;
+    for (unsigned i = 0; i <= 3; i++)
+      sgsSearchers.push_back(new SubpathGuidedSearcher(executor, i, theRNG));
+    searchers["sgs"] = std::unique_ptr<Searcher>(new InterleavedSearcher(sgsSearchers));
+  }
+
+  // Interleaved combos (KLEE default = random-path + nurs:covnew)
+  if (executionTree) {
+    std::vector<Searcher *> defaultCombo;
+    defaultCombo.push_back(new RandomPathSearcher(executionTree, theRNG));
+    defaultCombo.push_back(new WeightedRandomSearcher(
+        WeightedRandomSearcher::CoveringNew, theRNG));
+    searchers["default"] = std::unique_ptr<Searcher>(new InterleavedSearcher(defaultCombo));
+  }
 }
 
 std::string LLMGuidedSearcher::getCurrentFunction(ExecutionState *state) const {
@@ -319,7 +451,7 @@ std::string LLMGuidedSearcher::getFunctionSignature(ExecutionState *state) const
   if (!state || !state->pc || !state->pc->inst) return "";
   const llvm::Function *func = state->pc->inst->getParent()->getParent();
   if (!func) return "";
-  
+
   std::string sig;
   llvm::raw_string_ostream rso(sig);
   func->getReturnType()->print(rso);
@@ -334,11 +466,9 @@ std::string LLMGuidedSearcher::getFunctionSignature(ExecutionState *state) const
 
 StateFeatures LLMGuidedSearcher::buildFeatures(ExecutionState *state) const {
   StateFeatures f;
-  
-  // Default query type is "function" (overridden for health queries)
   f.queryType = "function";
   f.healthStatus = "";
-  
+
   f.functionName = getCurrentFunction(state);
   f.functionSignature = getFunctionSignature(state);
   f.stackDepth = state->stack.size();
@@ -348,9 +478,7 @@ StateFeatures LLMGuidedSearcher::buildFeatures(ExecutionState *state) const {
   f.instsSinceCovNew = state->instsSinceCovNew;
   f.coveredNew = state->coveredNew;
   f.symbolicVarCount = state->symbolics.size();
-  
-  // NOTE: stats::states is an indexed-only statistic (always 0 globally)
-  // We track state count ourselves via update() calls
+
   f.activeStates = trackedStateCount;
   f.totalForks = stats::forks;
   f.inhibitedForks = stats::inhibitedForks;
@@ -359,36 +487,26 @@ StateFeatures LLMGuidedSearcher::buildFeatures(ExecutionState *state) const {
   f.coveredBranches = stats::trueBranches + stats::falseBranches;
   f.totalInstructions = stats::instructions;
   f.externalCalls = stats::externalCalls;
-  
+
   f.solverTime = stats::solverTime;
   f.forkTime = stats::forkTime;
-  
+
   f.minDistToUncovered = stats::minDistToUncovered;
   f.minDistToReturn = stats::minDistToReturn;
-  
-  // Per-state completion proximity metrics
-  // Get this state's distance to return from the indexed statistics
+
   if (state->pc && state->pc->info) {
     f.stateDistToReturn = theStatisticManager->getIndexedValue(
         stats::minDistToReturn, state->pc->info->id);
   } else {
     f.stateDistToReturn = UINT_MAX;
   }
-  
-  // Check if we're in main
+
   f.inMainFunction = (f.functionName == "main");
-  
-  // A state is "near termination" if:
-  // - Distance to return is small (< 10 instructions)
-  // - AND we're close to the top of the call stack (depth <= 2)
-  // This means we're likely to generate a ktest soon
-  f.nearTermination = (f.stateDistToReturn > 0 && 
-                       f.stateDistToReturn <= 10 && 
+  f.nearTermination = (f.stateDistToReturn > 0 &&
+                       f.stateDistToReturn <= 10 &&
                        f.stackDepth <= 2);
-  
-  // Count completed states (successful exits generate ktests)
   f.completedStates = stats::terminationExit;
-  
+
   return f;
 }
 
@@ -397,189 +515,215 @@ void LLMGuidedSearcher::switchSearcher(const std::string &name) {
   if (it != searchers.end() && it->second) {
     currentSearcherName = name;
     currentSearcher = it->second.get();
-    
-    if (PolicyVerbose) {
+    if (PolicyVerbose)
       llvm::errs() << "[Policy] Switched to: " << name << "\n";
-    }
   } else {
-    if (PolicyVerbose) {
-      llvm::errs() << "[Policy] Unknown searcher: " << name 
+    if (PolicyVerbose)
+      llvm::errs() << "[Policy] Unknown searcher: " << name
                    << ", keeping: " << currentSearcherName << "\n";
-    }
   }
 }
 
+void LLMGuidedSearcher::applyDecision(const std::string &decision) {
+  std::string normalized = decision;
+  std::transform(normalized.begin(), normalized.end(),
+                 normalized.begin(), ::tolower);
+
+  if (searchers.count(normalized)) {
+    switchSearcher(normalized);
+  } else if (normalized.find("dfs") != std::string::npos &&
+             normalized.find("bfs") == std::string::npos) {
+    switchSearcher("dfs");
+  } else if (normalized.find("bfs") != std::string::npos) {
+    switchSearcher("bfs");
+  } else if (normalized.find("random-path") != std::string::npos ||
+             normalized.find("randompath") != std::string::npos) {
+    if (searchers.count("random-path"))
+      switchSearcher("random-path");
+  } else if (normalized.find("random-state") != std::string::npos ||
+             normalized.find("randomstate") != std::string::npos) {
+    switchSearcher("random-state");
+  } else if (normalized.find("md2u") != std::string::npos ||
+             normalized.find("mindist") != std::string::npos) {
+    switchSearcher("nurs:md2u");
+  } else if (normalized.find("nurs:depth") != std::string::npos) {
+    switchSearcher("nurs:depth");
+  } else if (normalized.find("nurs:rp") != std::string::npos) {
+    switchSearcher("nurs:rp");
+  } else if (normalized.find("cpicnt") != std::string::npos) {
+    switchSearcher("nurs:cpicnt");
+  } else if (normalized.find("icnt") != std::string::npos ||
+             normalized.find("instcount") != std::string::npos) {
+    switchSearcher("nurs:icnt");
+  } else if (normalized.find("qc") != std::string::npos ||
+             normalized.find("querycost") != std::string::npos) {
+    switchSearcher("nurs:qc");
+  } else if (normalized.find("covnew") != std::string::npos ||
+             normalized.find("coverage") != std::string::npos) {
+    switchSearcher("nurs:covnew");
+  } else if (normalized.find("empc") != std::string::npos ||
+             normalized.find("path cover") != std::string::npos) {
+    if (searchers.count("empc"))
+      switchSearcher("empc");
+  } else if (normalized.find("sgs") != std::string::npos ||
+             normalized.find("subpath") != std::string::npos) {
+    switchSearcher("sgs");
+  } else if (normalized.find("default") != std::string::npos ||
+             normalized.find("interleaved") != std::string::npos) {
+    if (searchers.count("default"))
+      switchSearcher("default");
+  }
+}
+
+void LLMGuidedSearcher::checkAsyncResponse() {
+  std::string response;
+  if (policyClient->tryRecv(response)) {
+    // A response has arrived from the background thread
+    queryInFlight = false;
+    asyncResponsesApplied++;
+
+    if (!response.empty()) {
+      applyDecision(response);
+    }
+
+    if (PolicyVerbose)
+      llvm::errs() << "[Policy] Async response applied: " << response
+                   << " -> " << currentSearcherName << "\n";
+  }
+}
+
+//===----------------------------------------------------------------------===//
+// selectState / update - THE HOT PATH (must be zero-latency)
+//===----------------------------------------------------------------------===//
+
 ExecutionState &LLMGuidedSearcher::selectState() {
   assert(!empty() && "Selecting from empty searcher");
-  
+
   totalSelections++;
   searcherUsage[currentSearcherName]++;
-  
+
+  // Zero-cost: just delegates to current searcher
   return currentSearcher->selectState();
 }
 
 void LLMGuidedSearcher::update(ExecutionState *current,
                                 const std::vector<ExecutionState *> &addedStates,
                                 const std::vector<ExecutionState *> &removedStates) {
-  // Update ALL searchers so they stay in sync
+  // 1) Update ALL delegate searchers (same cost as before, unavoidable)
   for (auto &kv : searchers) {
-    if (kv.second) {
+    if (kv.second)
       kv.second->update(current, addedStates, removedStates);
-    }
   }
-  
-  // Track state count ourselves since stats::states is indexed-only (always 0)
+
+  // 2) Track state count
   trackedStateCount += addedStates.size();
-  trackedStateCount -= removedStates.size();
-  
+  if (removedStates.size() <= trackedStateCount)
+    trackedStateCount -= removedStates.size();
+  else
+    trackedStateCount = 0;
+
   if (!current) return;
-  
-  // ===== Global Health Monitoring =====
-  // Increment instruction counter for health check timing
+
+  // 3) Check for async response from previous query (NON-BLOCKING: just a mutex try)
+  checkAsyncResponse();
+
+  // 4) Health monitoring (pure local computation, no I/O)
   instructionsSinceHealthCheck++;
-  
-  // Periodic health check
   if (instructionsSinceHealthCheck >= HealthCheckInterval) {
     instructionsSinceHealthCheck = 0;
-    
+
     std::string healthStatus = checkGlobalHealth(current);
-    
-    // Only query LLM if health status changed and is not healthy
+
     if (healthStatus != "healthy" && healthStatus != lastHealthStatus) {
       lastHealthStatus = healthStatus;
-      queryOnHealthChange(current, healthStatus);
+
+      // Send health query async (fire-and-forget)
+      if (!queryInFlight) {
+        healthQueries++;
+        StateFeatures features = buildFeatures(current);
+        features.queryType = "health";
+        features.healthStatus = healthStatus;
+        policyClient->sendAsync(features);
+        queryInFlight = true;
+
+        if (PolicyVerbose)
+          llvm::errs() << "[Policy] Health query sent (async): " << healthStatus << "\n";
+      }
     } else if (healthStatus == "healthy") {
       lastHealthStatus = healthStatus;
     }
   }
-  
-  // ===== Function-based Query =====
+
+  // 5) Function-based query: fire-and-forget (NON-BLOCKING)
+  //    Skip libc/runtime functions - only query LLM for program-specific code
   std::string newFunc = getCurrentFunction(current);
-  
-  // Query LLM when entering a new function
   if (newFunc != lastFunction && !newFunc.empty()) {
     lastFunction = newFunc;
-    policyQueries++;
-    
-    StateFeatures features = buildFeatures(current);
-    std::string decision = policyClient->query(features);
-    
-    if (!decision.empty()) {
-      // Normalize the response (lowercase, handle variations)
-      std::string normalized = decision;
-      std::transform(normalized.begin(), normalized.end(), 
-                     normalized.begin(), ::tolower);
-      
-      // Try exact match first (policy server should return exact names)
-        if (searchers.count(normalized)) {
-          switchSearcher(normalized);
-        }
-        // Fuzzy matching as fallback
-        else if (normalized.find("dfs") != std::string::npos &&
-                 normalized.find("bfs") == std::string::npos) {
-          switchSearcher("dfs");
-        } else if (normalized.find("bfs") != std::string::npos) {
-          switchSearcher("bfs");
-        } else if (normalized.find("random-path") != std::string::npos || 
-                   normalized.find("randompath") != std::string::npos) {
-          if (searchers.count("random-path")) {
-            switchSearcher("random-path");
-          }
-        } else if (normalized.find("random-state") != std::string::npos ||
-                   normalized.find("randomstate") != std::string::npos) {
-          switchSearcher("random-state");
-        } else if (normalized.find("md2u") != std::string::npos || 
-                   normalized.find("mindist") != std::string::npos) {
-          switchSearcher("nurs:md2u");
-        } else if (normalized.find("nurs:depth") != std::string::npos) {
-          switchSearcher("nurs:depth");
-        } else if (normalized.find("nurs:rp") != std::string::npos) {
-          switchSearcher("nurs:rp");
-        } else if (normalized.find("cpicnt") != std::string::npos) {
-          switchSearcher("nurs:cpicnt");
-        } else if (normalized.find("icnt") != std::string::npos || 
-                   normalized.find("instcount") != std::string::npos) {
-          switchSearcher("nurs:icnt");
-        } else if (normalized.find("qc") != std::string::npos || 
-                   normalized.find("querycost") != std::string::npos) {
-          switchSearcher("nurs:qc");
-        } else if (normalized.find("covnew") != std::string::npos || 
-                   normalized.find("coverage") != std::string::npos) {
-          switchSearcher("nurs:covnew");
-        }
-        // If no match, keep current searcher
-        
-        if (PolicyVerbose) {
-          llvm::errs() << "[Policy] Function: " << newFunc 
-                       << " -> " << currentSearcherName << "\n";
-        }
-      }
+
+    if (isLibcFunction(newFunc)) {
+      // Silently skip libc functions, keep current searcher
+      if (PolicyVerbose)
+        llvm::errs() << "[Policy] Skip libc: " << newFunc << "\n";
+    } else if (!queryInFlight) {
+      // Only send for actual program functions
+      policyQueries++;
+      StateFeatures features = buildFeatures(current);
+      policyClient->sendAsync(features);
+      queryInFlight = true;
+
+      if (PolicyVerbose)
+        llvm::errs() << "[Policy] Query sent (async): " << newFunc << "\n";
     }
+  }
 }
 
 //===----------------------------------------------------------------------===//
-// Global Health Monitoring
+// Health Monitoring (pure local computation, no I/O)
 //===----------------------------------------------------------------------===//
 
 std::string LLMGuidedSearcher::checkGlobalHealth(ExecutionState *state) {
   unsigned currentCovered = stats::coveredInstructions;
   unsigned currentBranches = stats::trueBranches + stats::falseBranches;
-  // NOTE: stats::states is indexed-only (always 0), use our tracked count
   unsigned currentStates = trackedStateCount;
   unsigned currentCompleted = stats::terminationExit;
-  
+
   std::vector<std::string> issues;
-  
-  // Check for coverage stall
-  if (currentCovered == lastCoveredInstructions && 
+
+  if (currentCovered == lastCoveredInstructions &&
       currentBranches == lastCoveredBranches) {
     coverageStallCounter++;
-    if (coverageStallCounter >= CoverageStallThreshold) {
+    if (coverageStallCounter >= CoverageStallThreshold)
       issues.push_back("coverage_stalled");
-    }
   } else {
-    // Coverage progressing - reset counter
     coverageStallCounter = 0;
     lastCoveredInstructions = currentCovered;
     lastCoveredBranches = currentBranches;
   }
-  
-  // Check for test generation stall (many states but no new ktests)
+
   if (currentCompleted == lastCompletedStates && currentStates > 50) {
     testGenStallCounter++;
-    if (testGenStallCounter >= CoverageStallThreshold) {
+    if (testGenStallCounter >= CoverageStallThreshold)
       issues.push_back("low_test_generation");
-    }
   } else {
     testGenStallCounter = 0;
     lastCompletedStates = currentCompleted;
   }
-  
-  // Check for state explosion
-  if (currentStates > StateExplosionThreshold) {
+
+  if (currentStates > StateExplosionThreshold)
     issues.push_back("state_explosion");
-  }
-  if (currentStates > peakStates) {
+  if (currentStates > peakStates)
     peakStates = currentStates;
-  }
-  
-  // Check for solver pressure (high solver time relative to total time)
-  uint64_t totalTime = stats::solverTime + stats::forkTime + 1; // avoid div by 0
+
+  uint64_t totalTime = stats::solverTime + stats::forkTime + 1;
   double solverRatio = static_cast<double>(stats::solverTime) / totalTime;
-  if (solverRatio > 0.7) {
+  if (solverRatio > 0.7)
     issues.push_back("solver_pressure");
-  }
-  
-  // Check for memory pressure (many states with high constraint counts)
-  if (state && state->constraints.size() > 50 && currentStates > 100) {
+
+  if (state && state->constraints.size() > 50 && currentStates > 100)
     issues.push_back("memory_pressure");
-  }
-  
-  // Build status string
-  if (issues.empty()) {
-    return "healthy";
-  }
-  
+
+  if (issues.empty()) return "healthy";
+
   std::string status;
   for (size_t i = 0; i < issues.size(); i++) {
     if (i > 0) status += ",";
@@ -588,68 +732,10 @@ std::string LLMGuidedSearcher::checkGlobalHealth(ExecutionState *state) {
   return status;
 }
 
-void LLMGuidedSearcher::queryOnHealthChange(ExecutionState *state, 
-                                            const std::string &healthStatus) {
-  healthQueries++;
-  
-  StateFeatures features = buildFeatures(state);
-  features.queryType = "health";
-  features.healthStatus = healthStatus;
-  
-  std::string decision = policyClient->query(features);
-  
-  if (!decision.empty()) {
-    std::string normalized = decision;
-    std::transform(normalized.begin(), normalized.end(), 
-                   normalized.begin(), ::tolower);
-    
-    // Same parsing logic as function-based queries
-    if (searchers.count(normalized)) {
-      switchSearcher(normalized);
-    } else if (normalized.find("dfs") != std::string::npos &&
-               normalized.find("bfs") == std::string::npos) {
-      switchSearcher("dfs");
-    } else if (normalized.find("bfs") != std::string::npos) {
-      switchSearcher("bfs");
-    } else if (normalized.find("random-path") != std::string::npos || 
-               normalized.find("randompath") != std::string::npos) {
-      if (searchers.count("random-path")) {
-        switchSearcher("random-path");
-      }
-    } else if (normalized.find("random-state") != std::string::npos ||
-               normalized.find("randomstate") != std::string::npos) {
-      switchSearcher("random-state");
-    } else if (normalized.find("md2u") != std::string::npos || 
-               normalized.find("mindist") != std::string::npos) {
-      switchSearcher("nurs:md2u");
-    } else if (normalized.find("nurs:depth") != std::string::npos) {
-      switchSearcher("nurs:depth");
-    } else if (normalized.find("nurs:rp") != std::string::npos) {
-      switchSearcher("nurs:rp");
-    } else if (normalized.find("cpicnt") != std::string::npos) {
-      switchSearcher("nurs:cpicnt");
-    } else if (normalized.find("icnt") != std::string::npos || 
-               normalized.find("instcount") != std::string::npos) {
-      switchSearcher("nurs:icnt");
-    } else if (normalized.find("qc") != std::string::npos || 
-               normalized.find("querycost") != std::string::npos) {
-      switchSearcher("nurs:qc");
-    } else if (normalized.find("covnew") != std::string::npos || 
-               normalized.find("coverage") != std::string::npos) {
-      switchSearcher("nurs:covnew");
-    }
-    
-    if (PolicyVerbose) {
-      llvm::errs() << "[Policy] Health: " << healthStatus 
-                   << " -> " << currentSearcherName << "\n";
-    }
-  }
-}
-
 bool LLMGuidedSearcher::empty() {
   return currentSearcher->empty();
 }
 
 void LLMGuidedSearcher::printName(llvm::raw_ostream &os) {
-  os << "LLMGuidedSearcher(" << currentSearcherName << ")";
+  os << "LLMGuidedSearcher(" << currentSearcherName << ", async)";
 }

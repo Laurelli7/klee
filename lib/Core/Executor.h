@@ -100,6 +100,7 @@ class Executor : public Interpreter {
   friend class StatsTracker;
   friend class MergeHandler;
   friend class ObjectState;
+  friend class LLMGuidedSearcher;
   friend klee::Searcher *klee::constructUserSearcher(Executor &executor);
 
 public:

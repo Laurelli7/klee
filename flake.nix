@@ -53,6 +53,11 @@
               z3-solver
               openai
               anthropic
+              click
+              matplotlib
+              seaborn
+              pandas
+              numpy
             ]);
           env = {
             # Z3_LIBRARY_PATH = "${pkgs.z3.dev}/lib";

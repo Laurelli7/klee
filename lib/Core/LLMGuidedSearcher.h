@@ -1,12 +1,18 @@
 ///===-- LLMGuidedSearcher.h - Policy-server guided search ------*- C++ -*-===//
 ///
-/// A searcher that communicates with an external policy server to decide
-/// which KLEE searcher to use. The LLM picks from all existing searchers:
-/// DFS, BFS, RandomState, RandomPath, NURS variants, etc.
+/// A searcher that communicates with an external LLM policy server to decide
+/// which KLEE searcher to use. All LLM communication is FULLY ASYNCHRONOUS:
+/// KLEE never blocks waiting for an LLM response.
 ///
 /// Architecture:
-///   KLEE ──[features]──► Policy Server ──[LLM]──► Searcher Name
-///        ◄──[decision]──
+///   KLEE main loop --> update()/selectState() --> zero-latency delegation
+///                                                      |
+///   Background thread --[features]--> Policy Server --[LLM]--> response
+///                     <--[decision]--                        stored in
+///                                                         pendingResponse
+///
+/// The main loop picks up the response on the NEXT update() call.
+/// Between sends, the current searcher keeps running at full speed.
 ///
 ///===----------------------------------------------------------------------===//
 
@@ -21,83 +27,107 @@
 #include <vector>
 #include <string>
 #include <map>
+#include <thread>
+#include <mutex>
+#include <atomic>
+#include <condition_variable>
 
 namespace klee {
 
 class Executor;
 class InMemoryExecutionTree;
 
-/// Lightweight features sent to policy server
+/// Lightweight features sent to policy server (JSON-serializable)
 struct StateFeatures {
-  // Query type: "function" or "health"
   std::string queryType;
-  
-  // Health status (only for health queries)
   std::string healthStatus;
-  
-  // Function info
+
   std::string functionName;
   std::string functionSignature;
-  unsigned stackDepth;
-  
-  // State-specific info
-  unsigned constraintCount;
-  unsigned depth;
-  unsigned steppedInstructions;
-  unsigned instsSinceCovNew;
-  bool coveredNew;
-  unsigned symbolicVarCount;
-  
-  // Global statistics
-  unsigned activeStates;
-  unsigned totalForks;
-  unsigned inhibitedForks;
-  unsigned coveredInstructions;
-  unsigned uncoveredInstructions;
-  unsigned coveredBranches;
-  unsigned totalInstructions;
-  unsigned externalCalls;
-  
-  // Solver stats
-  uint64_t solverTime;
-  uint64_t forkTime;
-  
-  // Distance heuristics (global)
-  unsigned minDistToUncovered;
-  unsigned minDistToReturn;
-  
-  // Per-state completion proximity
-  unsigned stateDistToReturn;      // This state's distance to return instruction
-  bool inMainFunction;             // True if current function is main
-  bool nearTermination;            // True if very close to completing (dist <= 5 && shallow stack)
-  unsigned completedStates;        // Total states that have terminated (ktest potential)
-  
+  unsigned stackDepth = 0;
+
+  unsigned constraintCount = 0;
+  unsigned depth = 0;
+  unsigned steppedInstructions = 0;
+  unsigned instsSinceCovNew = 0;
+  bool coveredNew = false;
+  unsigned symbolicVarCount = 0;
+
+  unsigned activeStates = 0;
+  unsigned totalForks = 0;
+  unsigned inhibitedForks = 0;
+  unsigned coveredInstructions = 0;
+  unsigned uncoveredInstructions = 0;
+  unsigned coveredBranches = 0;
+  unsigned totalInstructions = 0;
+  unsigned externalCalls = 0;
+
+  uint64_t solverTime = 0;
+  uint64_t forkTime = 0;
+
+  unsigned minDistToUncovered = 0;
+  unsigned minDistToReturn = 0;
+
+  unsigned stateDistToReturn = 0;
+  bool inMainFunction = false;
+  bool nearTermination = false;
+  unsigned completedStates = 0;
+
   std::string toJson() const;
 };
 
-/// Client for communicating with the policy server via Unix socket
+/// Async client for communicating with the policy server.
+/// All socket I/O runs on a background thread; the main thread never blocks.
 class PolicyClient {
 public:
   explicit PolicyClient(const std::string &socketPath);
   ~PolicyClient();
-  
-  bool connect();
-  void disconnect();
-  bool isConnected() const;
-  
-  /// Send features, receive searcher name
-  std::string query(const StateFeatures &features);
-  
+
+  /// Start the background I/O thread.
+  void start();
+
+  /// Stop the background thread and close the socket.
+  void stop();
+
+  /// Enqueue a query (non-blocking). Drops if one is already in-flight.
+  void sendAsync(const StateFeatures &features);
+
+  /// Check if a response arrived (non-blocking). Returns true + fills out.
+  bool tryRecv(std::string &response);
+
+  bool isRunning() const { return running.load(); }
+
 private:
   std::string socketPath;
-  int sockfd;
+  int sockfd = -1;
+
+  // Background thread
+  std::thread ioThread;
+  std::atomic<bool> running{false};
+  std::atomic<bool> shutdownRequested{false};
+
+  // Outbound: main thread -> background thread
+  std::mutex sendMutex;
+  std::condition_variable sendCv;
+  std::string pendingSend;
+  bool hasPendingSend = false;
+
+  // Inbound: background thread -> main thread
+  std::mutex recvMutex;
+  std::string pendingResponse;
+  bool hasResponse = false;
+
+  void ioLoop();
+  bool connectSocket();
+  void disconnectSocket();
+  std::string doBlockingQuery(const std::string &json);
 };
 
-/// LLMGuidedSearcher - Delegates to real KLEE searchers based on LLM decision
+/// LLMGuidedSearcher - Zero-latency searcher with async LLM guidance
 class LLMGuidedSearcher : public Searcher {
 public:
-  LLMGuidedSearcher(Executor &executor, RNG &rng, 
-                    InMemoryExecutionTree *executionTree);
+  LLMGuidedSearcher(Executor &executor, RNG &rng,
+                     InMemoryExecutionTree *executionTree);
   ~LLMGuidedSearcher() override;
 
   ExecutionState &selectState() override;
@@ -111,62 +141,46 @@ private:
   Executor &executor;
   RNG &theRNG;
   InMemoryExecutionTree *executionTree;
-  
-  // All available searchers - LLM picks which one to use
+
   std::map<std::string, std::unique_ptr<Searcher>> searchers;
-  
-  // Currently active searcher (chosen by LLM)
+
   std::string currentSearcherName;
   Searcher *currentSearcher;
-  
-  // Default searcher when policy server unavailable
   std::string defaultSearcherName;
-  
-  // Policy server client
+
   std::unique_ptr<PolicyClient> policyClient;
-  
-  // Track current function to detect changes
+
   std::string lastFunction;
-  
-  // ===== Global Health Monitoring =====
-  // Coverage history for stall detection
+
+  // Health monitoring
   unsigned lastCoveredInstructions = 0;
   unsigned lastCoveredBranches = 0;
   unsigned coverageStallCounter = 0;
-  
-  // Test generation tracking
   unsigned lastCompletedStates = 0;
   unsigned testGenStallCounter = 0;
-  
-  // Timing for periodic health checks
   unsigned instructionsSinceHealthCheck = 0;
-  unsigned healthCheckInterval = 1000;  // Check every N instructions
-  
-  // State explosion tracking
   unsigned peakStates = 0;
-  
-  // Tracked active state count (stats::states doesn't work - it's indexed only)
-  unsigned trackedStateCount = 1;  // Start with 1 (initial state)
-  
-  // Last health status sent to LLM
+  unsigned trackedStateCount = 1;
   std::string lastHealthStatus;
-  
+
+  // Async query management - only one in-flight at a time
+  bool queryInFlight = false;
+
   // Statistics
   unsigned totalSelections = 0;
   unsigned policyQueries = 0;
   unsigned healthQueries = 0;
+  unsigned asyncResponsesApplied = 0;
   std::map<std::string, unsigned> searcherUsage;
-  
-  // Helpers
+
   void initSearchers();
   std::string getCurrentFunction(ExecutionState *state) const;
   std::string getFunctionSignature(ExecutionState *state) const;
   StateFeatures buildFeatures(ExecutionState *state) const;
   void switchSearcher(const std::string &name);
-  
-  // Health monitoring
+  void applyDecision(const std::string &decision);
   std::string checkGlobalHealth(ExecutionState *state);
-  void queryOnHealthChange(ExecutionState *state, const std::string &healthStatus);
+  void checkAsyncResponse();
 };
 
 } // namespace klee

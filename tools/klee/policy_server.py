@@ -51,6 +51,9 @@ SEARCHERS = [
     "nurs:icnt",     # Instruction count
     "nurs:cpicnt",   # Call path instruction count
     "nurs:qc",       # Query cost
+    "empc",          # Exhaustive MPC - inter-procedural path coverage
+    "sgs",           # Subpath-Guided Search - interleaved subpath searchers
+    "default",       # KLEE default: interleaved random-path + nurs:covnew
 ]
 
 # Default searcher to use for libc functions (no LLM query)
@@ -137,12 +140,31 @@ def log(msg: str):
 DEFAULT_SYSTEM_PROMPT = """You are an expert symbolic execution strategist for KLEE.
 Your goal is to maximize CODE COVERAGE and TEST CASE GENERATION.
 {program_context}
+
+Available searchers:
+- dfs: Depth-first search. Good for completing paths and generating test cases.
+- bfs: Breadth-first search. Good for broad exploration.
+- random-state: Randomly select among active states.
+- random-path: Randomly walk the execution tree to select a state.
+- nurs:covnew: Prioritize states that cover new code. KLEE's best general-purpose strategy.
+- nurs:md2u: Prioritize states closest to uncovered code.
+- nurs:depth: Prioritize by execution depth.
+- nurs:rp: Random priority weighting.
+- nurs:icnt: Prioritize by instruction count.
+- nurs:cpicnt: Call path instruction count.
+- nurs:qc: Prioritize states with low query cost (fast solver queries).
+- empc: Exhaustive inter-procedural path coverage. Best for functions with complex call chains.
+- sgs: Subpath-guided search. Good for structured programs with many subpaths.
+- default: KLEE's default interleaved random-path + nurs:covnew. A strong baseline.
+
 Key principles:
 1. Coverage requires COMPLETING paths (generating ktests), not just exploring
 2. Many active states with few completed tests = need DFS to finish paths
 3. Coverage stall = try random-path to escape local optima
 4. High solver time = use nurs:qc to avoid expensive queries
 5. State near termination (low dist_to_return, shallow stack) = prioritize completion with DFS
+6. Complex control flow with many branches = try empc or sgs for systematic coverage
+7. When unsure, "default" or "nurs:covnew" are safe choices
 
 Always respond with:
 REASONING: <brief explanation>
@@ -251,8 +273,9 @@ class PolicyServer:
                             schema = {}
                         
                         func_name = features.get('function', 'unknown')
-                        query_type = features.get('query_type', 'function')
-                        health_status = features.get('health_status', '')
+                        # query_type and health_status are at the top level of the JSON
+                        query_type = request.get('query_type', features.get('query_type', 'function'))
+                        health_status = request.get('health_status', features.get('health_status', ''))
                         
                         # ============ FILTER: Skip libc functions (only for function queries) ============
                         if query_type == 'function' and is_libc_function(func_name):
@@ -274,8 +297,7 @@ class PolicyServer:
                                 if key not in ('function', 'signature'):
                                     log(f"  {key}: {value}")
                         
-                        # Query LLM
-                        query_type = features.get('query_type', 'function')
+                        # Query LLM (query_type already extracted above)
                         strategy, llm_raw_response, prompt = self.query_llm_with_logging(
                             features, schema, query_type)
                         
