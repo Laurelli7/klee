@@ -467,7 +467,7 @@ IntraProcDataAnalyzer::IntraProcDataAnalyzer(
             if (!isBlacklistedFunction(*calleeFunc)) {
               handleFlag = true;
               callees.emplace(calleeFunc);
-              for (unsigned i = 0; i < invokeInst->getNumArgOperands(); ++i) {
+              for (unsigned i = 0; i < invokeInst->arg_size(); ++i) {
                 llvm::Value *arg = invokeInst->getArgOperand(i);
                 paramValues.push_back(arg);
               }

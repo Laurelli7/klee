@@ -1,0 +1,24 @@
+#include "klee/klee.h"
+#include<stdio.h>
+int main(void)
+{
+	int a,b,s,ss;
+  klee_make_symbolic(&a, sizeof(a), "a");
+	while(1)	{
+		if(a==-1)	break;
+		if(a<=10){
+			s=1150;
+		}
+		else if(a<=20){
+			s=1150+125*(a-10);
+		}
+		else if(a<=30){
+			s=1150+1250+140*(a-20);
+		}
+		else {
+			s=1150+1250+1400+160*(a-30);
+		}
+		ss=4280-s;
+	}
+	return 0;
+}

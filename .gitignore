@@ -7,6 +7,16 @@ Output/
 # commonly used as cmake build directory
 /build
 
+# Locally cloned third-party builds (klee-uclibc, libcxx, etc.)
+/3rd
+
+# Python caches from searcher_selector/
+**/__pycache__/
+*.pyc
+
+# Tarball duplicates of klee_export/
+/klee_export.tar.gz
+
 cscope.*
 *~
 

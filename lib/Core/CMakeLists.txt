@@ -8,6 +8,7 @@
 #===------------------------------------------------------------------------===#
 add_library(kleeCore
   AddressSpace.cpp
+  AnchorGuidedSearcher.cpp
   LLMGuidedSearcher.cpp
   MergeHandler.cpp
   CallPathManager.cpp

@@ -80,6 +80,8 @@ public:
     Empc, /* [Empc]: Empc Searcher */
     SGS,  /* [SGS]: Subpath guided */
     LLMGuided, /* LLM-guided dynamic searcher that queries LLM per function */
+    AnchorGuided, /* Static-map searcher: per-function anchor map from
+                     searcher_selector/chunk_planner.py */
   };
 };
 

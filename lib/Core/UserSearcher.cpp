@@ -9,6 +9,7 @@
 
 #include "UserSearcher.h"
 
+#include "AnchorGuidedSearcher.h"
 #include "Executor.h"
 #include "LLMGuidedSearcher.h"
 #include "MergeHandler.h"
@@ -59,8 +60,17 @@ cl::list<Searcher::CoreSearchType> CoreSearch(
         /* LLM-guided dynamic searcher */
         clEnumValN(Searcher::LLMGuided, "llm",
                    "use LLM-guided searcher that queries LLM to decide "
-                   "strategy per function")),
+                   "strategy per function"),
+        /* Anchor-guided static-map searcher */
+        clEnumValN(Searcher::AnchorGuided, "anchor",
+                   "use anchor-map searcher; pair with --anchor-map=<json>")),
     cl::cat(SearchCat));
+
+cl::opt<std::string> AnchorMapPath(
+    "anchor-map",
+    cl::desc("Path to anchor-map JSON produced by chunk_planner.py "
+             "(required when --search=anchor)"),
+    cl::init(""), cl::cat(SearchCat));
 
 cl::opt<bool> UseIterativeDeepeningTimeSearch(
     "use-iterative-deepening-time-search",
@@ -111,14 +121,18 @@ bool userSearcherRequiresMD2U() {
           std::find(CoreSearch.begin(), CoreSearch.end(),
                     Searcher::NURS_CPICnt) != CoreSearch.end() ||
           std::find(CoreSearch.begin(), CoreSearch.end(), Searcher::NURS_QC) !=
-              CoreSearch.end();
+              CoreSearch.end() ||
+          std::find(CoreSearch.begin(), CoreSearch.end(),
+                    Searcher::AnchorGuided) != CoreSearch.end();
 }
 
 bool userSearcherRequiresInMemoryExecutionTree() {
   return std::find(CoreSearch.begin(), CoreSearch.end(),
                    Searcher::RandomPath) != CoreSearch.end() ||
          std::find(CoreSearch.begin(), CoreSearch.end(),
-                   Searcher::LLMGuided) != CoreSearch.end();
+                   Searcher::LLMGuided) != CoreSearch.end() ||
+         std::find(CoreSearch.begin(), CoreSearch.end(),
+                   Searcher::AnchorGuided) != CoreSearch.end();
 }
 
 // [Empc]: `SearcherGraph` is required
@@ -195,6 +209,12 @@ Searcher *getNewSearcher(Searcher::CoreSearchType type, RNG &rng,
   } break;
   case Searcher::LLMGuided:
     searcher = new LLMGuidedSearcher(executor, rng, executionTree);
+    break;
+  case Searcher::AnchorGuided:
+    if (AnchorMapPath.empty())
+      klee_error("--search=anchor requires --anchor-map=<path>");
+    searcher = new AnchorGuidedSearcher(AnchorMapPath, executor, rng,
+                                        executionTree);
     break;
   }
 
