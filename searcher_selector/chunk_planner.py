@@ -49,6 +49,84 @@ import rules  # noqa: E402
 CLANG = os.environ.get("CLANG", "/usr/bin/clang-14")
 LLVM_DIS = os.environ.get("LLVM_DIS", "/usr/bin/llvm-dis-14")
 KLEE_INCLUDE = os.environ.get("KLEE_INCLUDE", "/home/cc/klee/include")
+SVF_EXTRACT = os.environ.get(
+    "SVF_EXTRACT", str(HERE / "svf_features" / "build" / "extract_features"))
+
+
+def _compile_to_bc(src: Path) -> Path:
+    if src.suffix == ".bc":
+        return src
+    if src.suffix == ".ll":
+        bc = Path("/tmp") / (src.stem + ".bc")
+        subprocess.check_call(["/usr/bin/llvm-as-14", str(src), "-o", str(bc)])
+        return bc
+    if src.suffix == ".c":
+        bc = Path("/tmp") / (src.stem + ".bc")
+        subprocess.check_call([
+            CLANG, "-I", KLEE_INCLUDE,
+            "-emit-llvm", "-c", "-g", "-O0",
+            "-Xclang", "-disable-O0-optnone",
+            "-o", str(bc), str(src),
+        ])
+        return bc
+    raise SystemExit(f"unsupported input extension: {src.suffix}")
+
+
+def plan_svf(src_path: Path) -> dict:
+    """Per-function planner using the SVF C++ extractor.
+
+    Runs `extract_features` once with SVF_PER_FUNCTION=1; for each function
+    in the resulting `per_function` map, builds a ProgramFeatures and
+    applies `rules.select_searcher`. Same output schema as `plan()`.
+    """
+    if not Path(SVF_EXTRACT).exists():
+        raise SystemExit(
+            f"SVF extractor not built: {SVF_EXTRACT}\n"
+            f"       run searcher_selector/svf_features/build.sh")
+    bc = _compile_to_bc(src_path)
+    env = dict(os.environ, SVF_PER_FUNCTION="1")
+    out = subprocess.run(
+        [SVF_EXTRACT, "-stat=false", str(bc)],
+        check=True, capture_output=True, text=True, env=env,
+    )
+    data = json.loads(out.stdout)
+    per_fn = data.get("per_function", {})
+    # Whole-program globals to fold into each per-fn feature set.
+    n_total_funcs = int(data.get("total_functions", len(per_fn)))
+    has_klee_sym = bool(data.get("has_klee_symbolic", False))
+
+    anchors: dict[str, dict] = {}
+    transparent = 0
+    by_kind: dict[str, int] = {}
+
+    for fname, fdata in per_fn.items():
+        merged = dict(fdata)
+        merged.setdefault("total_functions", n_total_funcs)
+        merged.setdefault("has_klee_symbolic", has_klee_sym)
+        merged["dominant_function"] = fname
+        feats = rules.features_from_json(merged)
+        flags, reason = rules.select_searcher(feats)
+        if is_default(flags):
+            transparent += 1
+            continue
+        kind = flags_to_kind(flags)
+        anchors[fname] = {
+            "searcher": kind,
+            "rule": reason,
+            "blocks": int(fdata.get("total_blocks", 0)),
+            "back_edges": int(fdata.get("nested_loop_count", 0)),
+        }
+        by_kind[kind] = by_kind.get(kind, 0) + 1
+
+    return {
+        "version": 1,
+        "source": str(src_path),
+        "backend": "svf",
+        "default_searcher": _DEFAULT_FLAGS,
+        "anchors": anchors,
+        "transparent_count": transparent,
+        "summary_by_kind": by_kind,
+    }
 
 
 def compile_to_ll(src: Path) -> Path:
@@ -176,13 +254,15 @@ def main(argv: list[str]) -> None:
                    help="output JSON path (default: <source>.anchors.json)")
     p.add_argument("--print", action="store_true",
                    help="also print a human-readable summary to stdout")
+    p.add_argument("--backend", choices=["svf", "regex"], default="svf",
+                   help="feature extraction backend (default: svf)")
     args = p.parse_args(argv)
 
     if not args.source.exists():
         print(f"error: file not found: {args.source}", file=sys.stderr)
         sys.exit(1)
 
-    result = plan(args.source)
+    result = plan_svf(args.source) if args.backend == "svf" else plan(args.source)
 
     out_path = args.output
     if out_path is None:

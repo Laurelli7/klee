@@ -556,3 +556,41 @@ def select_searcher(f: ProgramFeatures) -> Tuple[List[str], str]:
     return (["--search=random-path", "--search=nurs:covnew"],
             "default: no strong structural signal — using KLEE's baseline "
             "interleaved random-path + nurs:covnew")
+
+
+# ----- JSON ingestion (SVF backend) ---------------------------------------
+
+def features_from_json(data: dict) -> ProgramFeatures:
+    """Build a ProgramFeatures from the JSON emitted by
+    `searcher_selector/svf_features/extract_features` (SVF-based extractor).
+
+    Unknown / missing fields fall back to the dataclass defaults so the
+    same downstream `select_searcher()` pipeline applies.
+    """
+    f = ProgramFeatures()
+    for k in (
+        "bit_test_chain_len",
+        "independent_call_regions",
+        "nested_loop_count",
+        "coverage_blind_score",
+        "cheap_branch_count",
+        "gep_chain_depth",
+        "convergent_diverg",
+        "total_functions",
+        "total_blocks",
+        "total_branches",
+    ):
+        if k in data:
+            setattr(f, k, int(data[k]))
+    for k in (
+        "has_bitwise_branch_conds",
+        "symbolic_loop_bound",
+        "has_direct_recursion",
+        "srem_in_branch",
+        "has_klee_symbolic",
+    ):
+        if k in data:
+            setattr(f, k, bool(data[k]))
+    if "dominant_function" in data:
+        f.dominant_function = str(data["dominant_function"])
+    return f

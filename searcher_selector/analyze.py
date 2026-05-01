@@ -24,11 +24,49 @@ import rules  # noqa: E402
 CLANG = os.environ.get("CLANG", "/usr/bin/clang-14")
 LLVM_DIS = os.environ.get("LLVM_DIS", "/usr/bin/llvm-dis-14")
 KLEE_INCLUDE = os.environ.get("KLEE_INCLUDE", "/home/cc/klee/include")
+SVF_EXTRACT = os.environ.get(
+    "SVF_EXTRACT", str(HERE / "svf_features" / "build" / "extract_features"))
 
 
 def _die(msg: str, code: int = 1):
     print(f"error: {msg}", file=sys.stderr)
     sys.exit(code)
+
+
+def compile_to_bc(src: Path) -> Path:
+    """Compile C source to LLVM bitcode (.bc).  Pass-through for .bc/.ll."""
+    if src.suffix == ".bc":
+        return src
+    if src.suffix == ".ll":
+        bc = Path("/tmp") / (src.stem + ".bc")
+        subprocess.check_call(["llvm-as-14", str(src), "-o", str(bc)])
+        return bc
+    if src.suffix == ".c":
+        bc = Path("/tmp") / (src.stem + ".bc")
+        subprocess.check_call([
+            CLANG, "-I", KLEE_INCLUDE,
+            "-emit-llvm", "-c", "-g", "-O0",
+            "-Xclang", "-disable-O0-optnone",
+            "-o", str(bc), str(src),
+        ])
+        return bc
+    _die(f"unsupported input extension: {src.suffix}")
+
+
+def analyze_with_svf(src_path: Path) -> tuple[rules.ProgramFeatures, list[str], str]:
+    """Use the SVF C++ extractor to compute features (preferred backend)."""
+    if not Path(SVF_EXTRACT).exists():
+        _die(f"SVF extractor not built: {SVF_EXTRACT}\n"
+             f"       run searcher_selector/svf_features/build.sh")
+    bc = compile_to_bc(src_path)
+    out = subprocess.run(
+        [SVF_EXTRACT, "-stat=false", str(bc)],
+        check=True, capture_output=True, text=True,
+    )
+    data = json.loads(out.stdout)
+    feats = rules.features_from_json(data)
+    flags, explanation = rules.select_searcher(feats)
+    return feats, flags, explanation
 
 
 def compile_to_ll(src: Path) -> Path:
@@ -78,12 +116,17 @@ def main(argv: list[str]):
     p.add_argument("--json", action="store_true", help="Emit JSON instead of human-readable")
     p.add_argument("--flags-only", action="store_true",
                    help="Print only the recommended KLEE --search flags (for scripts)")
+    p.add_argument("--backend", choices=("regex", "svf"), default="svf",
+                   help="Feature extractor backend (default: svf)")
     args = p.parse_args(argv)
 
     if not args.source.exists():
         _die(f"file not found: {args.source}")
 
-    feats, flags, reason = analyze(args.source)
+    if args.backend == "svf":
+        feats, flags, reason = analyze_with_svf(args.source)
+    else:
+        feats, flags, reason = analyze(args.source)
 
     if args.flags_only:
         print(" ".join(flags))
