@@ -1,5 +1,5 @@
 gclang_config := 'CC=gclang CXX=gclang++ CFLAGS="-g -O0 -Xclang -disable-O0-optnone"'
-cov_config := 'CFLAGS="-g -fprofile-instr-generate -fcoverage-mapping"'
+cov_config := 'CC=clang CXX=clang++ CFLAGS="-g -fprofile-instr-generate -fcoverage-mapping"'
 
 gnumake version="4.4":
     #!/usr/bin/env bash

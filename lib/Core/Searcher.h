@@ -82,6 +82,8 @@ public:
     LLMGuided, /* LLM-guided dynamic searcher that queries LLM per function */
     AnchorGuided, /* Static-map searcher: per-function anchor map from
                      searcher_selector/chunk_planner.py */
+    LLMProgramSearch, /* Static-map searcher: per-function map authored
+                         offline by an LLM that read the program source */
   };
 };
 

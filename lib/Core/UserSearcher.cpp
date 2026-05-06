@@ -10,6 +10,7 @@
 #include "UserSearcher.h"
 
 #include "AnchorGuidedSearcher.h"
+#include "LLMProgramSearcher.h"
 #include "Executor.h"
 #include "LLMGuidedSearcher.h"
 #include "MergeHandler.h"
@@ -63,13 +64,23 @@ cl::list<Searcher::CoreSearchType> CoreSearch(
                    "strategy per function"),
         /* Anchor-guided static-map searcher */
         clEnumValN(Searcher::AnchorGuided, "anchor",
-                   "use anchor-map searcher; pair with --anchor-map=<json>")),
+                   "use anchor-map searcher; pair with --anchor-map=<json>"),
+        /* LLM-authored static-map searcher */
+        clEnumValN(Searcher::LLMProgramSearch, "LLMProgramsearch",
+                   "use LLM-authored per-function map; pair with "
+                   "--llm-anchor-map=<json>")),
     cl::cat(SearchCat));
 
 cl::opt<std::string> AnchorMapPath(
     "anchor-map",
     cl::desc("Path to anchor-map JSON produced by chunk_planner.py "
              "(required when --search=anchor)"),
+    cl::init(""), cl::cat(SearchCat));
+
+cl::opt<std::string> LLMAnchorMapPath(
+    "llm-anchor-map",
+    cl::desc("Path to LLM-authored function->searcher map JSON "
+             "(required when --search=LLMProgramsearch)"),
     cl::init(""), cl::cat(SearchCat));
 
 cl::opt<bool> UseIterativeDeepeningTimeSearch(
@@ -123,7 +134,9 @@ bool userSearcherRequiresMD2U() {
           std::find(CoreSearch.begin(), CoreSearch.end(), Searcher::NURS_QC) !=
               CoreSearch.end() ||
           std::find(CoreSearch.begin(), CoreSearch.end(),
-                    Searcher::AnchorGuided) != CoreSearch.end();
+                    Searcher::AnchorGuided) != CoreSearch.end() ||
+          std::find(CoreSearch.begin(), CoreSearch.end(),
+                    Searcher::LLMProgramSearch) != CoreSearch.end();
 }
 
 bool userSearcherRequiresInMemoryExecutionTree() {
@@ -132,7 +145,9 @@ bool userSearcherRequiresInMemoryExecutionTree() {
          std::find(CoreSearch.begin(), CoreSearch.end(),
                    Searcher::LLMGuided) != CoreSearch.end() ||
          std::find(CoreSearch.begin(), CoreSearch.end(),
-                   Searcher::AnchorGuided) != CoreSearch.end();
+                   Searcher::AnchorGuided) != CoreSearch.end() ||
+         std::find(CoreSearch.begin(), CoreSearch.end(),
+                   Searcher::LLMProgramSearch) != CoreSearch.end();
 }
 
 // [Empc]: `SearcherGraph` is required
@@ -215,6 +230,12 @@ Searcher *getNewSearcher(Searcher::CoreSearchType type, RNG &rng,
       klee_error("--search=anchor requires --anchor-map=<path>");
     searcher = new AnchorGuidedSearcher(AnchorMapPath, executor, rng,
                                         executionTree);
+    break;
+  case Searcher::LLMProgramSearch:
+    if (LLMAnchorMapPath.empty())
+      klee_error("--search=LLMProgramsearch requires --llm-anchor-map=<path>");
+    searcher = new LLMProgramSearcher(LLMAnchorMapPath, executor, rng,
+                                       executionTree);
     break;
   }
 

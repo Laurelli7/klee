@@ -1,0 +1,25 @@
+language: c
+
+os:
+  - linux
+  - osx
+
+addons:
+  apt:
+    packages:
+      - check
+      - pandoc
+
+before_install:
+  - if [ $TRAVIS_OS_NAME == osx ]; then brew update && brew install check; fi
+
+script:
+  - mkdir build
+  - cd build
+  - cmake ..
+  - make
+  - ctest -V
+
+compiler:
+  - clang
+  - gcc

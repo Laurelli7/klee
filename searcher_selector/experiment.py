@@ -164,6 +164,15 @@ Requirements:
 - The pattern must be strong enough to discriminate between KLEE searchers.
 - Do NOT add explanatory comments.
 - Output ONLY the C source code, nothing else.
+
+CRITICAL KLEE TRACTABILITY CONSTRAINTS (violations make all searchers tie at 0):
+- Use at MOST 8 symbolic bytes total (e.g., `uint8_t x[8]`). More bytes →
+  symbolic expressions become too deep for the STP solver → KLEE makes 0 queries.
+- Do NOT use symbolic variables as loop bounds in arithmetic-heavy loops.
+  Use a concrete loop count (≤ 16 iterations) with a symbolic array as input.
+- Avoid multiplying two symbolic values together — STP cannot handle nonlinear
+  symbolic arithmetic. Use XOR/shift/add on symbolic values, not multiply.
+- Each `klee_make_symbolic` call should be on a small, fixed-size buffer.
 """
 
 
@@ -276,36 +285,59 @@ def compile_to_bc(src_path: Path) -> Path:
 # Step 4: Run KLEE with all searchers
 # ---------------------------------------------------------------------------
 
-def _parse_run_stats_text(text: str) -> dict:
-    """Parse KLEE run.stats CSV text and return coverage metrics."""
-    lines = [l for l in text.splitlines() if l.strip()]
-    if len(lines) < 2:
+def _query_stats_sqlite_in_container(container_stats_path: str) -> dict:
+    """Run a python3 sqlite3 query inside the docker container to read run.stats."""
+    py_cmd = (
+        f"python3 -c \""
+        f"import sqlite3,time; "
+        f"c=sqlite3.connect('{container_stats_path}'); "
+        f"c.execute('PRAGMA wal_checkpoint(FULL)'); "
+        f"row=c.execute('SELECT FullBranches,PartialBranches,NumQueries FROM stats "
+        f"ORDER BY WallTime DESC LIMIT 1').fetchone(); "
+        f"print(row[0] if row else 0, row[1] if row else 0, row[2] if row else 0)"
+        f"\""
+    )
+    result = subprocess.run(
+        ["sudo", "docker", "exec", DOCKER_CONTAINER, "bash", "-c", py_cmd],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
         return {"covered_branches": 0, "total_queries": 0}
-
-    header = [h.strip().strip("'") for h in lines[0].split(",")]
-    values = [v.strip() for v in lines[-1].split(",")]
-    row = dict(zip(header, values))
-
-    def get(key: str, default: int = 0) -> int:
-        try:
-            return int(row.get(key, default))
-        except (ValueError, TypeError):
-            return default
-
-    # KLEE 2.x uses CoveredBranches; 3.x uses CovI
+    parts = result.stdout.strip().split()
+    full, partial, queries = int(parts[0]), int(parts[1]), int(parts[2])
     return {
-        "covered_branches": max(get("CoveredBranches"), get("CovI")),
-        "total_queries":    get("SolverQueries", 0),
-        "completed_paths":  get("CompletedPaths", 0),
+        "covered_branches": full + partial,   # FullBranches + PartialBranches
+        "full_branches":    full,
+        "partial_branches": partial,
+        "total_queries":    queries,
     }
 
 
 def _parse_run_stats(stats_dir: Path) -> dict:
-    """Read KLEE run.stats from a host directory."""
+    """Read KLEE run.stats (SQLite format, KLEE 2.x and 3.x)."""
+    import sqlite3 as _sqlite3
     stats_file = stats_dir / "run.stats"
     if not stats_file.exists():
         return {"covered_branches": 0, "total_queries": 0}
-    return _parse_run_stats_text(stats_file.read_text())
+    try:
+        conn = _sqlite3.connect(str(stats_file))
+        conn.execute("PRAGMA wal_checkpoint(FULL)")
+        row = conn.execute(
+            "SELECT FullBranches, PartialBranches, SolverQueries "
+            "FROM stats ORDER BY WallTime DESC LIMIT 1"
+        ).fetchone()
+        conn.close()
+        if not row:
+            return {"covered_branches": 0, "total_queries": 0}
+        full, partial, queries = int(row[0]), int(row[1]), int(row[2])
+        return {
+            "covered_branches": full + partial,
+            "full_branches":    full,
+            "partial_branches": partial,
+            "total_queries":    queries,
+        }
+    except Exception:
+        return {"covered_branches": 0, "total_queries": 0}
 
 
 def run_klee_searcher_docker(bc_path: Path, searcher: str, time_budget: int,
@@ -336,13 +368,10 @@ def run_klee_searcher_docker(bc_path: Path, searcher: str, time_budget: int,
         timeout=time_budget + 60,
     )
 
-    # Read run.stats from container
-    stats_result = subprocess.run(
-        ["sudo", "docker", "exec", DOCKER_CONTAINER, "cat",
-         f"{container_out_dir}/run.stats"],
-        capture_output=True, text=True,
-    )
-    stats = _parse_run_stats_text(stats_result.stdout)
+    import time as _time; _time.sleep(1)  # let WAL flush before querying SQLite
+
+    # Read run.stats via SQLite query in container (KLEE 2.1 uses SQLite)
+    stats = _query_stats_sqlite_in_container(f"{container_out_dir}/run.stats")
     stats["searcher"] = searcher
     stats["returncode"] = result.returncode
     return stats
@@ -492,6 +521,100 @@ def apply_rule_update(proposal: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Experiment log writer
+# ---------------------------------------------------------------------------
+
+def _append_log_entry(
+    log_path: Path,
+    round_num: int,
+    chunk: dict | None,
+    src_path: Path,
+    source: str,
+    prediction: dict,
+    results: list[dict],
+    actual_winner: str,
+    correct: bool,
+    rule_change: str,
+    time_budget: int,
+) -> None:
+    import datetime
+    date_str = datetime.date.today().isoformat()
+    target_rule = chunk.get("target_rule", "?") if chunk else "provided"
+    source_desc = (f"real ({chunk['fn_name']} from {Path(chunk['source']).name})"
+                   if chunk and chunk.get("source") != "synthetic"
+                   else f"synthetic ({target_rule})")
+
+    results_lines = []
+    for r in results:
+        cov = r.get("covered_branches", 0)
+        q   = r.get("total_queries", 0)
+        tag = "  <-- WINNER" if r["searcher"] == actual_winner else (
+              "  <-- PREDICTED" if r["searcher"] == prediction.get("predicted_searcher") else "")
+        results_lines.append(f"  {r['searcher']:18s}  coverage={cov:6d}  queries={q:8d}{tag}")
+
+    outcome = "CORRECT" if correct else f"WRONG (predicted {prediction.get('predicted_searcher')}, actual {actual_winner})"
+
+    entry = f"""
+### Round {round_num} — {date_str}
+
+**Source**: {source_desc}
+**Target rule**: {target_rule}
+**Program**: {src_path}
+
+**LLM prediction**: {prediction.get('predicted_searcher', '?')}
+**Rules cited**: {prediction.get('rules_fired', [])}
+**Reasoning**: {prediction.get('reasoning', '')}
+
+**KLEE results** ({time_budget}s budget per searcher):
+{"  searcher            coverage   queries":s}
+{chr(10).join(results_lines)}
+
+**Actual winner**: {actual_winner}
+**Outcome**: {outcome}
+
+**Rule change**: {rule_change}
+
+---
+"""
+
+    # Read existing log and insert before the summary statistics table
+    existing = log_path.read_text() if log_path.exists() else ""
+    if "## Rounds" in existing:
+        # Insert entry after "## Rounds\n\n*(no rounds logged yet..."
+        marker = "*(no rounds logged yet — run `experiment.py` to populate)*"
+        if marker in existing:
+            existing = existing.replace(marker, entry.strip())
+        else:
+            # Append before the summary statistics section
+            stat_marker = "## Summary Statistics"
+            if stat_marker in existing:
+                existing = existing.replace(stat_marker, entry.strip() + "\n\n## Summary Statistics")
+            else:
+                existing += entry
+    else:
+        existing += entry
+
+    # Update summary statistics
+    total_rounds  = len(re.findall(r'^### Round \d+', existing, re.MULTILINE))
+    correct_count = len(re.findall(r'^\*\*Outcome\*\*: CORRECT', existing, re.MULTILINE))
+    wrong_count   = len(re.findall(r'^\*\*Outcome\*\*: WRONG', existing, re.MULTILINE))
+    accuracy = f"{correct_count}/{total_rounds} ({100*correct_count//total_rounds}%)" if total_rounds else "—"
+    changes = len(re.findall(r'^\*\*Rule change\*\*: (?!none|proposed)', existing, re.MULTILINE))
+
+    def _update_stat(text: str, label: str, value: str) -> str:
+        return re.sub(rf'\| {re.escape(label)} \| .* \|', f'| {label} | {value} |', text)
+
+    existing = _update_stat(existing, "Total rounds", str(total_rounds))
+    existing = _update_stat(existing, "Correct predictions", str(correct_count))
+    existing = _update_stat(existing, "Wrong predictions", str(wrong_count))
+    existing = _update_stat(existing, "Prediction accuracy", accuracy)
+    existing = _update_stat(existing, "Rule changes triggered", str(changes))
+
+    log_path.write_text(existing)
+    print(f"\nLog written to {log_path}")
+
+
+# ---------------------------------------------------------------------------
 # Main feedback loop
 # ---------------------------------------------------------------------------
 
@@ -580,15 +703,15 @@ def run_experiment(
             ll_path = Path("/tmp") / (src_path.stem + "_feat.ll")
             host_bc = Path("/tmp") / (src_path.stem + "_feat.bc")
             # Use host clang-14 just for feature extraction (LLVM IR is LLVM IR)
-            subprocess.check_call(
+            subprocess.run(
                 [CLANG, "-I", KLEE_INCLUDE,
                  "-emit-llvm", "-c", "-g", "-O0",
                  "-Xclang", "-disable-O0-optnone",
                  "-o", str(host_bc), str(src_path)],
-                capture_output=True,
+                check=True, capture_output=True,
             )
-            subprocess.check_call([LLVM_DIS, str(host_bc), "-o", str(ll_path)],
-                                   capture_output=True)
+            subprocess.run([LLVM_DIS, str(host_bc), "-o", str(ll_path)],
+                           check=True, capture_output=True)
             ll_functions = rules_mod.parse_ir(ll_path.read_text())
             features = rules_mod.compute_features(ll_functions)
         except Exception as e:
@@ -629,11 +752,30 @@ def run_experiment(
                 profile = icfg_chunks.profile_function(fn)
                 seen_db.add(chunk["fn_name"], str(source_bc), profile, actual_winner)
 
-        # ---- Reflect and update rules if wrong ----
+        # ---- Reflect and propose rule update if wrong ----
+        rule_change_text = "none"
         if not correct:
             print("\nReflecting on wrong prediction ...", flush=True)
             proposal = reflect_and_propose_update(source, features, prediction, results)
-            apply_rule_update(proposal)
+            changed = apply_rule_update(proposal)
+            rule_change_text = proposal if changed else f"proposed but not applied:\n{proposal}"
+
+        # ---- Write to experiment log ----
+        import datetime
+        log_path = HERE.parent / "klee_export" / "realworld_rules" / "experiment_log.md"
+        _append_log_entry(
+            log_path=log_path,
+            round_num=round_num,
+            chunk=chunk,
+            src_path=src_path,
+            source=source,
+            prediction=prediction,
+            results=results,
+            actual_winner=actual_winner,
+            correct=correct,
+            rule_change=rule_change_text,
+            time_budget=time_budget,
+        )
 
 
 # ---------------------------------------------------------------------------

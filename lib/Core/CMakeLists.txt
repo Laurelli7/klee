@@ -10,6 +10,7 @@ add_library(kleeCore
   AddressSpace.cpp
   AnchorGuidedSearcher.cpp
   LLMGuidedSearcher.cpp
+  LLMProgramSearcher.cpp
   MergeHandler.cpp
   CallPathManager.cpp
   Context.cpp
