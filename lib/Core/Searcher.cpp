@@ -575,3 +575,120 @@ void InterleavedSearcher::printName(llvm::raw_ostream &os) {
     searcher->printName(os);
   os << "</InterleavedSearcher>\n";
 }
+
+///
+
+PerFunctionSearcher::PerFunctionSearcher(
+    std::vector<std::unique_ptr<Searcher>> subs,
+    std::vector<Searcher::CoreSearchType> kinds,
+    std::map<std::string, unsigned> funcMap, unsigned defaultSubIdx,
+    std::string lbl)
+    : subSearchers(std::move(subs)), subKinds(std::move(kinds)),
+      funcToSub(std::move(funcMap)), defaultSub(defaultSubIdx),
+      label(std::move(lbl)) {
+  assert(!subSearchers.empty() && "PerFunctionSearcher needs >= 1 sub-searcher");
+  assert(defaultSub < subSearchers.size());
+}
+
+unsigned PerFunctionSearcher::subForState(ExecutionState *state) const {
+  if (!state || state->stack.empty() || !state->pc || !state->pc->inst)
+    return defaultSub;
+  llvm::Function *f = state->pc->inst->getFunction();
+  if (!f)
+    return defaultSub;
+  auto it = funcToSub.find(f->getName().str());
+  if (it == funcToSub.end())
+    return defaultSub;
+  return it->second;
+}
+
+void PerFunctionSearcher::migrateIfNeeded(ExecutionState *state) {
+  auto it = stateOwner.find(state);
+  if (it == stateOwner.end())
+    return;
+  unsigned want = subForState(state);
+  if (want == it->second)
+    return;
+  std::vector<ExecutionState *> one{state};
+  std::vector<ExecutionState *> none;
+  subSearchers[it->second]->update(nullptr, none, one);
+  subSearchers[want]->update(nullptr, one, none);
+  it->second = want;
+}
+
+ExecutionState &PerFunctionSearcher::selectState() {
+  // Round-robin over non-empty sub-searchers, starting from rrIndex.
+  unsigned n = subSearchers.size();
+  for (unsigned step = 0; step < n; ++step) {
+    unsigned idx = (rrIndex + step) % n;
+    if (!subSearchers[idx]->empty()) {
+      rrIndex = (idx + 1) % n;
+      return subSearchers[idx]->selectState();
+    }
+  }
+  // Should not happen: top-level Executor checks empty() before selectState.
+  assert(0 && "PerFunctionSearcher::selectState with all sub-searchers empty");
+  return subSearchers[0]->selectState();
+}
+
+void PerFunctionSearcher::update(
+    ExecutionState *current, const std::vector<ExecutionState *> &addedStates,
+    const std::vector<ExecutionState *> &removedStates) {
+  // First, route added states.
+  for (auto *s : addedStates) {
+    unsigned idx = subForState(s);
+    stateOwner[s] = idx;
+  }
+  // Bucket added/removed by sub-searcher index.
+  std::map<unsigned, std::vector<ExecutionState *>> addedBy, removedBy;
+  for (auto *s : addedStates)
+    addedBy[stateOwner[s]].push_back(s);
+  for (auto *s : removedStates) {
+    auto it = stateOwner.find(s);
+    if (it != stateOwner.end()) {
+      removedBy[it->second].push_back(s);
+    }
+  }
+  // The "current" pointer represents the just-run state. Forward it only to
+  // its current owner (others should not see it as "current").
+  std::map<unsigned, ExecutionState *> currentBy;
+  if (current) {
+    auto it = stateOwner.find(current);
+    if (it != stateOwner.end())
+      currentBy[it->second] = current;
+  }
+  for (unsigned i = 0; i < subSearchers.size(); ++i) {
+    ExecutionState *cur = nullptr;
+    auto cit = currentBy.find(i);
+    if (cit != currentBy.end())
+      cur = cit->second;
+    auto &add = addedBy[i];
+    auto &rem = removedBy[i];
+    if (cur || !add.empty() || !rem.empty()) {
+      subSearchers[i]->update(cur, add, rem);
+    }
+  }
+  // Drop owner records of removed states.
+  for (auto *s : removedStates)
+    stateOwner.erase(s);
+  // Migrate the current state if it has crossed a function boundary
+  // (e.g. via a call/ret) since the last update.
+  if (current && stateOwner.count(current))
+    migrateIfNeeded(current);
+}
+
+bool PerFunctionSearcher::empty() {
+  for (auto &s : subSearchers)
+    if (!s->empty())
+      return false;
+  return true;
+}
+
+void PerFunctionSearcher::printName(llvm::raw_ostream &os) {
+  os << "<PerFunctionSearcher label=\"" << label
+     << "\" functions=" << funcToSub.size()
+     << " sub_searchers=" << subSearchers.size() << ">\n";
+  for (const auto &s : subSearchers)
+    s->printName(os);
+  os << "</PerFunctionSearcher>\n";
+}

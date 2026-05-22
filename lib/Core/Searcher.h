@@ -71,7 +71,9 @@ public:
     NURS_RP,
     NURS_ICnt,
     NURS_CPICnt,
-    NURS_QC
+    NURS_QC,
+    PerFunctionLLM,
+    PerFunctionRandom
   };
 };
 
@@ -290,6 +292,44 @@ public:
   /// \param baseSearcher The underlying searcher (takes ownership).
   explicit IterativeDeepeningTimeSearcher(Searcher *baseSearcher);
   ~IterativeDeepeningTimeSearcher() override = default;
+
+  ExecutionState &selectState() override;
+  void update(ExecutionState *current,
+              const std::vector<ExecutionState *> &addedStates,
+              const std::vector<ExecutionState *> &removedStates) override;
+  bool empty() override;
+  void printName(llvm::raw_ostream &os) override;
+};
+
+/// PerFunctionSearcher dispatches state selection to one of several
+/// sub-searchers, chosen according to which LLVM function the state's
+/// program counter currently lies in.
+///
+/// The mapping `function -> CoreSearchType` is provided either by an external
+/// LLM (--per-function-assignment=<file>) or randomly (per-function-random).
+/// Each distinct CoreSearchType used in the assignment is instantiated as one
+/// owned sub-searcher; every state is added to exactly one sub-searcher at a
+/// time and migrated whenever it crosses a function boundary.
+class PerFunctionSearcher final : public Searcher {
+  std::vector<std::unique_ptr<Searcher>> subSearchers;
+  std::vector<Searcher::CoreSearchType> subKinds;
+  /// function-name -> index into subSearchers
+  std::map<std::string, unsigned> funcToSub;
+  /// state -> index of sub-searcher currently holding it
+  std::map<ExecutionState *, unsigned> stateOwner;
+  unsigned defaultSub{0};
+  unsigned rrIndex{0};
+  std::string label;
+
+  unsigned subForState(ExecutionState *state) const;
+  void migrateIfNeeded(ExecutionState *state);
+
+public:
+  PerFunctionSearcher(std::vector<std::unique_ptr<Searcher>> subs,
+                      std::vector<Searcher::CoreSearchType> kinds,
+                      std::map<std::string, unsigned> funcMap,
+                      unsigned defaultSubIdx, std::string label);
+  ~PerFunctionSearcher() override = default;
 
   ExecutionState &selectState() override;
   void update(ExecutionState *current,
