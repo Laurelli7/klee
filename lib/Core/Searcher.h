@@ -313,6 +313,10 @@ public:
 class PerFunctionSearcher final : public Searcher {
   std::vector<std::unique_ptr<Searcher>> subSearchers;
   std::vector<Searcher::CoreSearchType> subKinds;
+  /// per-bucket WRR quantum (weight); default 1 = uniform round-robin.
+  std::vector<unsigned> subWeights;
+  /// per-bucket WRR remaining credits in the current cycle.
+  std::vector<unsigned> subCredits;
   /// function-name -> index into subSearchers
   std::map<std::string, unsigned> funcToSub;
   /// state -> index of sub-searcher currently holding it
@@ -323,12 +327,15 @@ class PerFunctionSearcher final : public Searcher {
 
   unsigned subForState(ExecutionState *state) const;
   void migrateIfNeeded(ExecutionState *state);
+  /// Refill subCredits = subWeights (used when all credits are exhausted).
+  void refillCredits();
 
 public:
   PerFunctionSearcher(std::vector<std::unique_ptr<Searcher>> subs,
                       std::vector<Searcher::CoreSearchType> kinds,
                       std::map<std::string, unsigned> funcMap,
-                      unsigned defaultSubIdx, std::string label);
+                      unsigned defaultSubIdx, std::string label,
+                      std::vector<unsigned> weights = {});
   ~PerFunctionSearcher() override = default;
 
   ExecutionState &selectState() override;

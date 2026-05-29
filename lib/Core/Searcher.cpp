@@ -582,12 +582,24 @@ PerFunctionSearcher::PerFunctionSearcher(
     std::vector<std::unique_ptr<Searcher>> subs,
     std::vector<Searcher::CoreSearchType> kinds,
     std::map<std::string, unsigned> funcMap, unsigned defaultSubIdx,
-    std::string lbl)
+    std::string lbl, std::vector<unsigned> weights)
     : subSearchers(std::move(subs)), subKinds(std::move(kinds)),
+      subWeights(std::move(weights)),
       funcToSub(std::move(funcMap)), defaultSub(defaultSubIdx),
       label(std::move(lbl)) {
   assert(!subSearchers.empty() && "PerFunctionSearcher needs >= 1 sub-searcher");
   assert(defaultSub < subSearchers.size());
+  // Default to uniform round-robin (weight=1 everywhere) if no weights given.
+  if (subWeights.size() != subSearchers.size())
+    subWeights.assign(subSearchers.size(), 1);
+  for (auto &w : subWeights)
+    if (w == 0) w = 1; // never starve a bucket
+  subCredits = subWeights;
+}
+
+void PerFunctionSearcher::refillCredits() {
+  for (unsigned i = 0; i < subCredits.size(); ++i)
+    subCredits[i] = subWeights[i];
 }
 
 unsigned PerFunctionSearcher::subForState(ExecutionState *state) const {
@@ -617,14 +629,25 @@ void PerFunctionSearcher::migrateIfNeeded(ExecutionState *state) {
 }
 
 ExecutionState &PerFunctionSearcher::selectState() {
-  // Round-robin over non-empty sub-searchers, starting from rrIndex.
+  // Weighted round-robin (deficit-style):
+  //   * Each non-empty bucket consumes one of its credits per pick and is
+  //     re-visited until its credits hit zero (i.e. it gets up to `weight`
+  //     consecutive picks before yielding to the next non-empty bucket).
+  //   * When no non-empty bucket has credit, refill all credits and retry.
+  // With all weights = 1, this degenerates to the original round-robin.
   unsigned n = subSearchers.size();
-  for (unsigned step = 0; step < n; ++step) {
-    unsigned idx = (rrIndex + step) % n;
-    if (!subSearchers[idx]->empty()) {
-      rrIndex = (idx + 1) % n;
-      return subSearchers[idx]->selectState();
+  for (unsigned attempt = 0; attempt < 2; ++attempt) {
+    for (unsigned step = 0; step < n; ++step) {
+      unsigned idx = (rrIndex + step) % n;
+      if (subCredits[idx] > 0 && !subSearchers[idx]->empty()) {
+        subCredits[idx]--;
+        rrIndex = idx; // stay on this bucket until its credits drain
+        return subSearchers[idx]->selectState();
+      }
     }
+    // No non-empty bucket has credit left; start a fresh cycle.
+    refillCredits();
+    rrIndex = 0;
   }
   // Should not happen: top-level Executor checks empty() before selectState.
   assert(0 && "PerFunctionSearcher::selectState with all sub-searchers empty");
@@ -687,7 +710,10 @@ bool PerFunctionSearcher::empty() {
 void PerFunctionSearcher::printName(llvm::raw_ostream &os) {
   os << "<PerFunctionSearcher label=\"" << label
      << "\" functions=" << funcToSub.size()
-     << " sub_searchers=" << subSearchers.size() << ">\n";
+     << " sub_searchers=" << subSearchers.size() << " weights=[";
+  for (unsigned i = 0; i < subWeights.size(); ++i)
+    os << (i ? "," : "") << subWeights[i];
+  os << "]>\n";
   for (const auto &s : subSearchers)
     s->printName(os);
   os << "</PerFunctionSearcher>\n";

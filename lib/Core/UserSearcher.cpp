@@ -283,6 +283,9 @@ static Searcher *buildPerFunctionSearcher(Searcher::CoreSearchType variant,
                                           const std::vector<std::string> &candidateFuncs) {
   // 2) Build raw assignment: function-name -> CoreSearchType.
   std::map<std::string, Searcher::CoreSearchType> rawMap;
+  // Optional per-searcher-kind WRR weight (from `@weight <kind> <int>` directives
+  // in the assignment file). Defaults to 1 (=> uniform round-robin = old behavior).
+  std::map<Searcher::CoreSearchType, unsigned> rawWeights;
 
   if (variant == Searcher::PerFunctionLLM) {
     if (PerFunctionAssignment.empty()) {
@@ -302,6 +305,28 @@ static Searcher *buildPerFunctionSearcher(Searcher::CoreSearchType variant,
       size_t b = line.find_first_not_of(" \t\r");
       if (b == std::string::npos) continue;
       if (line[b] == '#') continue;
+      // `@weight <kind> <int>` directive
+      if (line.compare(b, 7, "@weight") == 0 &&
+          (line.size() == b + 7 || line[b + 7] == ' ' || line[b + 7] == '\t')) {
+        std::istringstream iss(line.substr(b + 7));
+        std::string kind;
+        unsigned w = 0;
+        if (!(iss >> kind >> w) || w == 0) {
+          klee_warning("per-function-assignment %s:%u: malformed @weight "
+                       "directive, expected `@weight <kind> <positive_int>`",
+                       PerFunctionAssignment.c_str(), lineno);
+          continue;
+        }
+        Searcher::CoreSearchType k;
+        if (!parseSearcherKind(kind, k)) {
+          klee_warning("per-function-assignment %s:%u: unknown searcher in "
+                       "@weight directive: \"%s\"",
+                       PerFunctionAssignment.c_str(), lineno, kind.c_str());
+          continue;
+        }
+        rawWeights[k] = w;
+        continue;
+      }
       std::istringstream iss(line);
       std::string fname, kind;
       if (!(iss >> fname >> kind)) {
@@ -405,9 +430,26 @@ static Searcher *buildPerFunctionSearcher(Searcher::CoreSearchType variant,
                searcherKindName(variant), funcToSub.size(), subs.size(),
                searcherKindName(defaultKind));
 
+  // Build per-bucket weight vector aligned with subKinds.
+  std::vector<unsigned> subWeights(subs.size(), 1);
+  if (!rawWeights.empty()) {
+    std::string weightSummary;
+    for (unsigned i = 0; i < subKinds.size(); ++i) {
+      auto it = rawWeights.find(subKinds[i]);
+      if (it != rawWeights.end()) subWeights[i] = it->second;
+      if (!weightSummary.empty()) weightSummary += ", ";
+      weightSummary += searcherKindName(subKinds[i]);
+      weightSummary += "=";
+      weightSummary += std::to_string(subWeights[i]);
+    }
+    klee_message("per-function searcher: WRR weights [%s]",
+                 weightSummary.c_str());
+  }
+
   return new PerFunctionSearcher(std::move(subs), std::move(subKinds),
                                  std::move(funcToSub), defaultIdx,
-                                 searcherKindName(variant));
+                                 searcherKindName(variant),
+                                 std::move(subWeights));
 }
 
 Searcher *klee::constructUserSearcher(Executor &executor) {
